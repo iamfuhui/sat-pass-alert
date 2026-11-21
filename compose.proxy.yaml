@@ -1,0 +1,6 @@
+# Optional override for a reverse proxy running on the Docker host.
+# docker compose -f compose.yaml -f compose.proxy.yaml up -d --build
+services:
+  spa:
+    ports: !override
+      - "127.0.0.1:${SPA_PORT:-18473}:8000"

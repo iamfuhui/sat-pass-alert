@@ -1,0 +1,307 @@
+import hashlib
+import secrets
+import threading
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from pathlib import Path
+from urllib.parse import urlsplit
+import httpx
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, Query
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session
+from .config import settings
+from .db import SessionLocal, get_db, utcnow
+from .models import User, Invite, SystemSetting, Satellite, Subscription, Notification
+from .security import hasher, verify_password, serializer, cipher, current_user, admin_user
+from .schemas import Credentials, Registration, Profile, BarkConfig, SubscriptionInput, OrbitInput, FetchInput, RegistrationMode, Approval
+from .orbits import predict
+from .catalog import save_satellite, refresh_one
+from .bark import send_bark, PushError
+from .worker import loop
+
+
+@asynccontextmanager
+async def lifespan(app):
+    if len(settings.secret) < 32:
+        raise RuntimeError('APP_SECRET_KEY must contain at least 32 characters')
+    origin = urlsplit(settings.bark_origin)
+    if origin.scheme not in ('https', 'http') or not origin.hostname or origin.username or origin.query or origin.fragment:
+        raise RuntimeError('Invalid BARK_SERVER_URL')
+    with SessionLocal() as db:
+        if db.scalar(select(User).where(User.is_admin.is_(True))) is None:
+            if len(settings.admin_password) < 12:
+                raise RuntimeError('Set ADMIN_PASSWORD (at least 12 characters) for initial admin')
+            db.add(User(username=settings.admin_username, password_hash=hasher.hash(settings.admin_password),
+                is_admin=True, approved=True))
+            db.commit()
+    stop = threading.Event()
+    worker = threading.Thread(target=loop, args=(stop,), daemon=True)
+    if settings.worker_enabled:
+        worker.start()
+    yield
+    stop.set()
+    if settings.worker_enabled:
+        worker.join(timeout=25)
+
+
+app = FastAPI(title='SPA — Sat Pass Alert', version='0.1.0', lifespan=lifespan)
+attempts = defaultdict(deque)
+rate_lock = threading.Lock()
+
+
+@app.middleware('http')
+async def security_headers(request: Request, call_next):
+    if request.url.path.startswith('/api/') and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        # Same-origin custom header protects cookie sessions even on plain HTTP.
+        if request.headers.get('x-spa-request') != '1':
+            return JSONResponse({'detail': '缺少请求安全标记'}, status_code=403)
+        if request.headers.get('sec-fetch-site') == 'cross-site':
+            return JSONResponse({'detail': '拒绝跨站请求'}, status_code=403)
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    if request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def throttle(request, category, limit=10):
+    key = (request.client.host if request.client else 'unknown', category)
+    now = time.monotonic()
+    with rate_lock:
+        # Bound memory used by inactive clients.
+        for old in list(attempts):
+            if not attempts[old] or attempts[old][-1] < now - 300:
+                del attempts[old]
+        q = attempts[key]
+        while q and q[0] < now - 300:
+            q.popleft()
+        if len(q) >= limit:
+            raise HTTPException(429, '操作过于频繁，请五分钟后重试')
+        q.append(now)
+
+
+def profile(user):
+    return {k: getattr(user, k) for k in ('id', 'username', 'is_admin', 'approved',
+        'latitude', 'longitude', 'altitude_m', 'timezone', 'locator')} | {'bark_configured': bool(user.bark_key)}
+
+
+def cancel_pending(db, user_id, norad_id=None):
+    query = update(Notification).where(Notification.user_id == user_id, Notification.state == 'pending')
+    if norad_id is not None:
+        query = query.where(Notification.norad_id == norad_id)
+    db.execute(query.values(state='cancelled'))
+
+
+@app.get('/healthz')
+def health(db: Session = Depends(get_db)):
+    try:
+        db.execute(text('SELECT 1'))
+        db.execute(select(SystemSetting.key).limit(1))
+    except SQLAlchemyError:
+        raise HTTPException(503, 'database unavailable or migrations missing')
+    return {'status': 'ok', 'version': '0.1.0'}
+
+
+@app.get('/api/v1/auth/options')
+def options(db: Session = Depends(get_db)):
+    value = db.get(SystemSetting, 'registration_mode')
+    return {'registration_mode': value.value if value else 'closed'}
+
+
+@app.post('/api/v1/auth/login')
+def login(data: Credentials, request: Request, response: Response, db: Session = Depends(get_db)):
+    throttle(request, 'auth')
+    user = db.scalar(select(User).where(User.username == data.username))
+    if user is None or not verify_password(data.password, user.password_hash) or not user.approved:
+        raise HTTPException(401, '用户名、密码错误或账号待审核')
+    response.set_cookie('spa_session', serializer().dumps(user.id), httponly=True,
+        secure=settings.cookie_secure, samesite='strict', max_age=86400)
+    return profile(user)
+
+
+@app.post('/api/v1/auth/logout')
+def logout(response: Response):
+    response.delete_cookie('spa_session')
+    return {'ok': True}
+
+
+@app.post('/api/v1/auth/register', status_code=201)
+def register(data: Registration, request: Request, db: Session = Depends(get_db)):
+    throttle(request, 'auth')
+    mode = options(db)['registration_mode']
+    if mode == 'closed':
+        raise HTTPException(403, '注册已关闭')
+    if mode == 'invite':
+        digest = hashlib.sha256((data.invite or '').encode()).hexdigest()
+        used = db.execute(update(Invite).where(Invite.token_hash == digest,
+            Invite.used.is_(False), Invite.expires_at > utcnow()).values(used=True))
+        if not used.rowcount:
+            raise HTTPException(400, '邀请码无效或已使用')
+    user = User(username=data.username, password_hash=hasher.hash(data.password),
+        approved=(mode == 'invite'), is_admin=False)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, '用户名不可用')
+    return {'approved': user.approved}
+
+
+@app.get('/api/v1/me')
+def me(user: User = Depends(current_user)):
+    return profile(user)
+
+
+@app.put('/api/v1/me')
+def update_me(data: Profile, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    for key, value in data.model_dump().items():
+        setattr(user, key, value)
+    # Delete only unsent predictions; retained sent records still deduplicate.
+    for n in db.scalars(select(Notification).where(Notification.user_id == user.id,
+            Notification.state.in_(['pending', 'cancelled']))):
+        db.delete(n)
+    db.commit()
+    return profile(user)
+
+
+@app.put('/api/v1/me/bark')
+def bark_config(data: BarkConfig, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    user.bark_key = cipher().encrypt(data.key.encode()).decode() if data.key else None
+    db.commit()
+    return {'configured': bool(user.bark_key)}
+
+
+@app.post('/api/v1/me/bark/test')
+def bark_test(request: Request, user: User = Depends(current_user)):
+    throttle(request, 'bark', 3)
+    if not user.bark_key:
+        raise HTTPException(400, '请先保存 Bark Key')
+    try:
+        send_bark(cipher().decrypt(user.bark_key.encode()).decode(), 'SPA 测试通知', '卫星过境提醒通道已连接。')
+    except PushError as exc:
+        raise HTTPException(502, str(exc))
+    return {'ok': True}
+
+
+@app.get('/api/v1/satellites')
+def satellites(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [{k: getattr(s, k) for k in ('norad_id', 'name', 'epoch', 'fetched_at',
+        'amsat_name', 'amsat_status', 'amsat_checked_at')} for s in db.scalars(select(Satellite).order_by(Satellite.name))]
+
+
+@app.post('/api/v1/admin/satellites/import')
+def import_orbit(data: OrbitInput, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    try:
+        s = save_satellite(db, **data.model_dump())
+        db.commit()
+        return {'norad_id': s.norad_id, 'name': s.name}
+    except (ValueError, KeyError, TypeError):
+        db.rollback()
+        raise HTTPException(422, '轨道格式或校验无效')
+
+
+@app.post('/api/v1/admin/satellites/fetch')
+def fetch_orbit(data: FetchInput, request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    throttle(request, 'fetch', 20)
+    try:
+        s = refresh_one(db, **data.model_dump())
+        db.commit()
+        return {'norad_id': s.norad_id, 'name': s.name}
+    except (ValueError, KeyError, TypeError, httpx.HTTPError):
+        db.rollback()
+        raise HTTPException(502, 'CelesTrak 获取失败；可手动导入 TLE/OMM')
+
+
+@app.get('/api/v1/subscriptions')
+def subscriptions(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [{k: getattr(s, k) for k in ('norad_id', 'min_elevation', 'lead_minutes', 'enabled')}
+        for s in db.scalars(select(Subscription).where(Subscription.user_id == user.id))]
+
+
+@app.put('/api/v1/subscriptions/{norad_id}')
+def subscribe(norad_id: int, data: SubscriptionInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if db.get(Satellite, norad_id) is None:
+        raise HTTPException(404, '未找到卫星')
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id, Subscription.norad_id == norad_id))
+    if sub is None:
+        sub = Subscription(user_id=user.id, norad_id=norad_id)
+        db.add(sub)
+    for key, value in data.model_dump().items():
+        setattr(sub, key, value)
+    for n in db.scalars(select(Notification).where(Notification.user_id == user.id,
+            Notification.norad_id == norad_id, Notification.state.in_(['pending', 'cancelled']))):
+        db.delete(n)
+    db.commit()
+    return {'ok': True}
+
+
+@app.get('/api/v1/passes')
+def passes(hours: int = Query(default=24, ge=1, le=72), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    result, warnings = [], []
+    rows = db.execute(select(Subscription, Satellite).join(Satellite)
+        .where(Subscription.user_id == user.id, Subscription.enabled.is_(True))).all()
+    for sub, sat in rows:
+        try:
+            result.extend(predict(sat, user.latitude, user.longitude, user.altitude_m, utcnow(), hours, sub.min_elevation))
+        except (ValueError, KeyError):
+            warnings.append(f'{sat.name}: 轨道过期或无效，请管理员更新')
+    return {'passes': sorted(result, key=lambda p: p['aos']), 'warnings': warnings}
+
+
+@app.get('/api/v1/notifications')
+def notifications(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [{k: getattr(n, k) for k in ('id', 'norad_id', 'aos', 'due_at', 'title', 'state', 'attempts', 'last_error', 'sent_at')}
+        for n in db.scalars(select(Notification).where(Notification.user_id == user.id)
+            .order_by(Notification.id.desc()).limit(100))]
+
+
+@app.get('/api/v1/admin/users')
+def users(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return [profile(u) for u in db.scalars(select(User).order_by(User.id))]
+
+
+@app.put('/api/v1/admin/users/{user_id}/approval')
+def approval(user_id: int, data: Approval, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, '用户不存在')
+    if target.is_admin:
+        raise HTTPException(400, '不能停用管理员')
+    target.approved = data.approved
+    if not data.approved:
+        cancel_pending(db, user_id)
+    db.commit()
+    return {'ok': True}
+
+
+@app.put('/api/v1/admin/registration')
+def registration_mode(data: RegistrationMode, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    db.merge(SystemSetting(key='registration_mode', value=data.mode))
+    db.commit()
+    return {'ok': True}
+
+
+@app.post('/api/v1/admin/invites')
+def invite(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    token = secrets.token_urlsafe(24)
+    db.add(Invite(token_hash=hashlib.sha256(token.encode()).hexdigest(), expires_at=utcnow() + timedelta(days=7)))
+    db.commit()
+    return {'invite': token, 'expires_in_days': 7}
+
+
+@app.get('/api/v1/admin/status')
+def status(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    last = db.get(SystemSetting, 'worker_last_tick')
+    return {'worker_enabled': settings.worker_enabled, 'last_tick_utc': last.value if last else None}
+
+
+if Path(settings.static_dir).is_dir():
+    app.mount('/', StaticFiles(directory=settings.static_dir, html=True), name='frontend')

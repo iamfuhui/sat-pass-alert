@@ -21,42 +21,54 @@ Self-hosted satellite pass forecasts and notifications for amateur radio operato
 
 ## Docker Compose 快速开始
 
-需要 Docker Engine 和 Docker Compose v2。建议先从源码构建。
+需要 Docker Engine 和 Docker Compose v2。已发布 `linux/amd64` 和 `linux/arm64` 镜像，Docker 会自动选择当前机器的架构。
 
 ```sh
-git clone https://github.com/iamfuhui/sat-pass-alert.git
-cd sat-pass-alert
-cp .env.example .env
+docker pull ghcr.io/iamfuhui/sat-pass-alert:0.1.0-alpha
 ```
 
-在 `.env` 中填写以下设置。模板中的示例密码需要替换。
+### 使用内置 MariaDB
+
+在一个新的部署目录中下载与镜像版本匹配的 Compose 文件，再创建 `.env`：
+
+```sh
+mkdir -p sat-pass-alert
+cd sat-pass-alert
+curl -fsSLO https://raw.githubusercontent.com/iamfuhui/sat-pass-alert/v0.1.0-alpha/compose.yaml
+```
+
+将以下内容保存为 `.env`，为四个空值各生成一个不同的随机值。可以运行 `openssl rand -hex 32` 生成随机值。应用密钥至少 32 个字符，初始管理员密码至少 12 个字符。
 
 ```dotenv
-APP_SECRET_KEY=
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=
-DB_PASSWORD=
-DB_ROOT_PASSWORD=
+SPA_IMAGE_TAG=0.1.0-alpha
 SPA_BIND_IP=127.0.0.1
 SPA_PORT=18473
 COOKIE_SECURE=true
+ADMIN_USERNAME=admin
+APP_SECRET_KEY=
+ADMIN_PASSWORD=
+DB_PASSWORD=
+DB_ROOT_PASSWORD=
 ```
 
-为应用和数据库生成不同的随机值。应用密钥至少 32 个字符，初始管理员密码至少 12 个字符。内置 MariaDB 的密码建议使用 URL 安全字符。
-
 ```sh
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
-docker compose up -d --build
+chmod 600 .env
+docker compose pull
+docker compose up -d --no-build
 docker compose ps
 curl -fsS http://127.0.0.1:18473/healthz
 ```
 
-默认 Compose 启动应用和独立的 MariaDB 数据卷。应用启动时会运行 Alembic 迁移。通过 HTTPS 反向代理将站点转发到宿主机的 `http://127.0.0.1:18473`，再从 HTTPS 站点登录。按需配置 `TRUSTED_PROXY_IPS`，只列出实际可信的代理地址。
+Compose 会启动 SPA 和独立的 MariaDB 数据卷。应用启动时会自动运行 Alembic 迁移。配置 HTTPS 反向代理，将请求转发到宿主机的 `http://127.0.0.1:18473`，然后使用 `.env` 中的管理员凭据从 HTTPS 入口登录。仅在需要解析代理转发头时设置 `TRUSTED_PROXY_IPS`，并填写实际可信的代理地址。
 
-如果已有专用 MariaDB 数据库，可使用 `compose.external-db.yaml`。将 `DATABASE_URL` 指向已创建的数据库，给应用账户迁移权限，并对连接串中的密码特殊字符做 URL 编码。
+### 使用现有 MariaDB
+
+如果已有专用 MariaDB 数据库，在 `.env` 中保留镜像、入口和应用配置，另设 `DATABASE_URL=mysql+pymysql://用户:密码@数据库主机:3306/数据库名?charset=utf8mb4`。提前创建数据库、授予应用账户迁移权限，并对连接串中的密码特殊字符做 URL 编码。
 
 ```sh
-docker compose -f compose.external-db.yaml up -d --build
+curl -fsSLO https://raw.githubusercontent.com/iamfuhui/sat-pass-alert/v0.1.0-alpha/compose.external-db.yaml
+docker compose -f compose.external-db.yaml pull
+docker compose -f compose.external-db.yaml up -d --no-build
 ```
 
 ## 第一次使用

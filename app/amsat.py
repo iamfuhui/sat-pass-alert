@@ -1,15 +1,32 @@
 """Read-only, best-effort adapter for the public AMSAT status chart."""
 import re
+import threading
 from datetime import datetime, timedelta
 import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 from .models import Satellite
-from .db import utcnow
+from .db import SessionLocal, utcnow
 
 URL = 'https://status.amsat.org/'
-COLORS = {'648fff': 'Sat/Mode Active', 'ffb000': 'TLM/Beacon only',
-          'dc267f': 'Not Heard', 'fe6100': 'Conflicting reports'}
+COLORS = {
+    '648fff': '转发器活跃',
+    'ffb000': '仅信标/遥测',
+    'dc267f': '未被听到',
+    'fe6100': '报告存在冲突',
+}
+REPORT_MAX_AGE = timedelta(hours=48)
+_bg_lock = threading.Lock()
+
+
+def _format_report_age(delta: timedelta) -> str:
+    mins = max(0, int(delta.total_seconds() // 60))
+    if mins < 1:
+        return '刚刚报告'
+    if mins < 60:
+        return f'{mins}分钟前报告'
+    hours = mins // 60
+    return f'{hours}小时前报告'
 
 
 def parse_status(html, name, now):
@@ -35,9 +52,10 @@ def parse_status(html, name, now):
         if not dates:
             return '未知（报告时间不可解析）'
         latest = max(datetime.strptime(d, '%Y-%m-%d %H:%M UTC') for d in dates)
-        if now - latest > timedelta(hours=24) or latest > now + timedelta(minutes=5):
-            return '未知（无最近 24 小时报告）'
-        return f'{COLORS[color]} · {latest:%m-%d %H:%M} UTC'
+        age = now - latest
+        if age > REPORT_MAX_AGE or latest > now + timedelta(minutes=5):
+            return '未知（48小时内无报告）'
+        return f'{COLORS[color]}（{_format_report_age(age)}）'
     return '未知（无最近报告）'
 
 
@@ -47,7 +65,7 @@ def refresh_status(db):
         return
     now = utcnow()
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
+        with httpx.Client(timeout=12, follow_redirects=False) as client:
             response = client.get(URL)
             response.raise_for_status()
             if len(response.content) > 5_000_000:
@@ -57,6 +75,22 @@ def refresh_status(db):
             sat.amsat_checked_at = now
     except (httpx.HTTPError, ValueError):
         for sat in sats:
-            sat.amsat_status = '未知（AMSAT 暂不可用）'
+            if not sat.amsat_status:
+                sat.amsat_status = '未知（AMSAT 暂不可用）'
             sat.amsat_checked_at = now
     db.commit()
+
+
+def refresh_status_async():
+    """在后台守护线程中非阻塞刷新 AMSAT 状态。"""
+    if not _bg_lock.acquire(blocking=False):
+        return
+
+    def _run():
+        try:
+            with SessionLocal() as db:
+                refresh_status(db)
+        finally:
+            _bg_lock.release()
+
+    threading.Thread(target=_run, name='amsat-refresh', daemon=True).start()

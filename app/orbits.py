@@ -35,7 +35,6 @@ def predict(satellite, latitude, longitude, altitude_m, start, hours=24, min_ele
     if max(abs((t - sat.epoch.utc_datetime()).total_seconds()) for t in (start, end)) > settings.tle_max_age_days * 86400:
         raise ValueError('轨道数据已过期，请刷新后重试')
     observer = wgs84.latlon(latitude, longitude, elevation_m=altitude_m)
-    # Horizon AOS/LOS are independent of the user's peak elevation filter.
     times, events = sat.find_events(observer, ts.from_datetime(start - timedelta(hours=2)),
         ts.from_datetime(end + timedelta(hours=2)), altitude_degrees=0)
     results, rising, peaks = [], None, []
@@ -50,10 +49,19 @@ def predict(satellite, latitude, longitude, altitude_m, start, hours=24, min_ele
             if peaks:
                 peak, peak_at = max(peaks)
                 if start <= rising[0] < end and math.isfinite(peak) and peak >= min_elevation:
+                    _, peak_az, _ = (sat - observer).at(ts.from_datetime(peak_at)).altaz()
+                    span = (at - rising[0]).total_seconds()
+                    track = []
+                    for i in range(17):
+                        st = rising[0] + timedelta(seconds=span * i / 16)
+                        sel, saz, _ = (sat - observer).at(ts.from_datetime(st)).altaz()
+                        track.append([round(saz.degrees, 1), round(max(0.0, sel.degrees), 1)])
                     results.append({'norad_id': satellite.norad_id, 'name': satellite.name,
                         'aos': rising[0].isoformat(), 'los': at.isoformat(), 'peak_at': peak_at.isoformat(),
                         'max_elevation': round(peak, 2), 'aos_azimuth': round(rising[1], 1),
+                        'peak_azimuth': round(peak_az.degrees, 1),
                         'los_azimuth': round(azimuth.degrees, 1),
+                        'track': track,
                         'amsat_status': satellite.amsat_status or '未知（不影响提醒）'})
             rising, peaks = None, []
     return results

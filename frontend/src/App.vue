@@ -543,14 +543,155 @@ onUnmounted(() => {
               <button class="primary" :disabled="busy || !!gridError">保存电台站设置</button>
             </form>
 
-            <form class="panel" @submit.prevent="action(async () => { await api('/me/bark', 'PUT', { key: barkKey }); setUser(await api('/me')); barkKey = '' }, 'Bark 设置已保存')">
-              <h2>Bark 推送</h2>
-              <span class="badge">{{ user.bark_configured ? '已配置' : '未配置' }}</span>
-              <p class="muted">输入 Bark App 中的设备 Key。保存后不再显示明文；留空保存可移除。</p>
-              <label>设备 Key<input v-model="barkKey" type="password" autocomplete="off" maxlength="256"></label>
-              <button class="primary" :disabled="busy">保存 Key</button>
-              <button type="button" :disabled="busy || !user.bark_configured" @click="action(() => api('/me/bark/test', 'POST'), '测试通知已提交 Bark')">发送测试通知</button>
-            </form>
+            <form class="panel" @submit.prevent="saveNotifyChannels">
+  <h2>多通道消息推送</h2>
+  <span class="badge">{{ user.bark_configured ? '已配置通道' : '未配置' }}</span>
+  <p class="muted">支持同时开启多个推送服务；已保存的密钥留空则保持不变。</p>
+  <details open class="notify-group">
+    <summary><strong>Bark（iOS / macOS）</strong> ·
+      <small>{{ user.notify_channels?.bark?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.bark.enabled" type="checkbox">启用 Bark
+    </label>
+    <label>设备 Key 或完整链接
+      <input v-model="notifyForm.bark.key" type="password"
+        placeholder="Key 或 https://api.day.app/Key/" autocomplete="off">
+    </label>
+    <label v-if="user.notify_channels?.bark?.configured" class="check">
+      <input v-model="notifyForm.bark.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.bark?.configured"
+      @click="testNotifyChannel('bark')">测试 Bark</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>Server酱 Turbo（微信）</strong> ·
+      <small>{{ user.notify_channels?.serverchan?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.serverchan.enabled" type="checkbox">启用 Server酱
+    </label>
+    <label>SendKey
+      <input v-model="notifyForm.serverchan.sendkey" type="password"
+        placeholder="SCT..." autocomplete="off">
+    </label>
+    <label v-if="user.notify_channels?.serverchan?.configured" class="check">
+      <input v-model="notifyForm.serverchan.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.serverchan?.configured"
+      @click="testNotifyChannel('serverchan')">测试 Server酱</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>PushPlus 推送加</strong> ·
+      <small>{{ user.notify_channels?.pushplus?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.pushplus.enabled" type="checkbox">启用 PushPlus
+    </label>
+    <label>Token
+      <input v-model="notifyForm.pushplus.token" type="password" autocomplete="off">
+    </label>
+    <label>群组 Topic（可选）
+      <input v-model="notifyForm.pushplus.topic" placeholder="一对一留空">
+    </label>
+    <label v-if="user.notify_channels?.pushplus?.configured" class="check">
+      <input v-model="notifyForm.pushplus.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.pushplus?.configured"
+      @click="testNotifyChannel('pushplus')">测试 PushPlus</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>Telegram Bot</strong> ·
+      <small>{{ user.notify_channels?.telegram?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.telegram.enabled" type="checkbox">启用 Telegram
+    </label>
+    <label>Bot Token
+      <input v-model="notifyForm.telegram.bot_token" type="password"
+        placeholder="123456:ABC..." autocomplete="off">
+    </label>
+    <label>Chat ID
+      <input v-model="notifyForm.telegram.chat_id" placeholder="用户或群组 ID">
+    </label>
+    <label v-if="user.notify_channels?.telegram?.configured" class="check">
+      <input v-model="notifyForm.telegram.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.telegram?.configured"
+      @click="testNotifyChannel('telegram')">测试 Telegram</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>ntfy（自建 / 官方）</strong> ·
+      <small>{{ user.notify_channels?.ntfy?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.ntfy.enabled" type="checkbox">启用 ntfy
+    </label>
+    <label>服务器地址
+      <input v-model="notifyForm.ntfy.server_url" placeholder="https://ntfy.sh">
+    </label>
+    <label>Topic 主题
+      <input v-model="notifyForm.ntfy.topic" placeholder="ba8blk-sat">
+    </label>
+    <label>Access Token（可选）
+      <input v-model="notifyForm.ntfy.token" type="password" autocomplete="off">
+    </label>
+    <label v-if="user.notify_channels?.ntfy?.configured" class="check">
+      <input v-model="notifyForm.ntfy.clear" type="checkbox">保存时清除配置
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.ntfy?.configured"
+      @click="testNotifyChannel('ntfy')">测试 ntfy</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>企业微信 / 钉钉 / 飞书机器人</strong> ·
+      <small>{{ user.notify_channels?.bot_webhook?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.bot_webhook.enabled" type="checkbox">启用群机器人
+    </label>
+    <label>Webhook URL
+      <input v-model="notifyForm.bot_webhook.url" type="password"
+        placeholder="https://qyapi.weixin.qq.com/..." autocomplete="off">
+    </label>
+    <label v-if="user.notify_channels?.bot_webhook?.configured" class="check">
+      <input v-model="notifyForm.bot_webhook.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.bot_webhook?.configured"
+      @click="testNotifyChannel('bot_webhook')">测试群机器人</button>
+  </details>
+  <details class="notify-group">
+    <summary><strong>自定义 Webhook</strong> ·
+      <small>{{ user.notify_channels?.webhook?.configured ? '已配置' : '未配置' }}</small>
+    </summary>
+    <label class="check">
+      <input v-model="notifyForm.webhook.enabled" type="checkbox">启用自定义 Webhook
+    </label>
+    <label>目标 URL
+      <input v-model="notifyForm.webhook.url" type="password"
+        placeholder="https://example.com/hook" autocomplete="off">
+    </label>
+    <label>Bearer Token（可选）
+      <input v-model="notifyForm.webhook.token" type="password" autocomplete="off">
+    </label>
+    <label v-if="user.notify_channels?.webhook?.configured" class="check">
+      <input v-model="notifyForm.webhook.clear" type="checkbox">保存时清除密钥
+    </label>
+    <button type="button"
+      :disabled="busy || !user.notify_channels?.webhook?.configured"
+      @click="testNotifyChannel('webhook')">测试 Webhook</button>
+  </details>
+  <div style="margin-top:16px">
+    <button class="primary" :disabled="busy">保存全部推送设置</button>
+    <button type="button" :disabled="busy || !user.bark_configured"
+      @click="testNotifyChannel()">测试所有已启用通道</button>
+  </div>
+</form>
           </div>
         </section>
 

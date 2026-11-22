@@ -25,7 +25,7 @@ DEFAULT_SATELLITES = [
     {'norad_id': 39444, 'name': 'AO-73 (FUNCUBE-1)', 'amsat_name': 'AO-73_[U/v]', 'aliases': ('AO-73', 'FUNCUBE-1', 'FUNCUBE 1')},
     {'norad_id': 43803, 'name': 'JO-97 (JY1SAT)', 'amsat_name': 'JO-97_[U/v]', 'aliases': ('JO-97', 'JY1SAT')},
     {'norad_id': 24278, 'name': 'FO-29 (JAS-2)', 'amsat_name': 'FO-29_[V/u]', 'aliases': ('FO-29', 'JAS-2', 'JAS 2')},
-    {'norad_id': None, 'name': 'SO-131', 'amsat_name': 'SO-131_[V/u_FM]', 'aliases': ('SO-131', 'SO131')},
+    {'norad_id': 101101, 'name': 'SO-131 (UNNE-1B)', 'amsat_name': 'SO-131_[V/u_FM]', 'aliases': ('SO-131', 'SO131', 'UNNE-1B')},
 ]
 
 _amsat_cache = {'fetched_at': 0.0, 'entries': []}

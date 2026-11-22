@@ -1,3 +1,4 @@
+import json
 import hashlib
 import secrets
 import threading
@@ -22,7 +23,7 @@ from .schemas import Credentials, Registration, Profile, BarkConfig, Subscriptio
 from .orbits import predict
 from .catalog import save_satellite, refresh_one, sync_default_satellites
 from .amsat import refresh_status_async
-from .bark import send_bark, PushError
+from .bark import dispatch_notifications, has_configured_channel, mask_channels_summary, normalize_bark_key, parse_channels, PushError
 from .worker import loop
 
 
@@ -98,11 +99,29 @@ def throttle(request, category, limit=10):
         q.append(now)
 
 
-def profile(user):
-    return {k: getattr(user, k) for k in ('id', 'username', 'is_admin', 'approved',
-        'latitude', 'longitude', 'altitude_m', 'timezone', 'locator')} | {'bark_configured': bool(user.bark_key)}
+def _decrypt_notify(user: User) -> str | None:
+    if not user.bark_key:
+        return None
+    try:
+        return cipher().decrypt(user.bark_key.encode()).decode()
+    except Exception:
+        return None
 
 
+def profile(user: User):
+    secret_raw = _decrypt_notify(user)
+    return {
+        'id': user.id,
+        'username': user.username,
+        'is_admin': user.is_admin,
+        'locator': user.locator,
+        'latitude': user.latitude,
+        'longitude': user.longitude,
+        'altitude_m': user.altitude_m,
+        'timezone': user.timezone,
+        'bark_configured': has_configured_channel(secret_raw),
+        'notify_channels': mask_channels_summary(secret_raw),
+    }
 def cancel_pending(db, user_id, norad_id=None):
     query = update(Notification).where(Notification.user_id == user_id, Notification.state == 'pending')
     if norad_id is not None:
@@ -185,21 +204,118 @@ def update_me(data: Profile, user: User = Depends(current_user), db: Session = D
 
 @app.put('/api/v1/me/bark')
 def bark_config(data: BarkConfig, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    user.bark_key = cipher().encrypt(data.key.encode()).decode() if data.key else None
+    existing = parse_channels(_decrypt_notify(user))
+    if data.key:
+        existing['bark'] = {'enabled': True, 'key': normalize_bark_key(data.key)}
+    else:
+        existing.pop('bark', None)
+    user.bark_key = cipher().encrypt(json.dumps(existing).encode()).decode() if existing else None
     db.commit()
-    return {'configured': bool(user.bark_key)}
+    return {'configured': has_configured_channel(_decrypt_notify(user))}
+
+
+@app.put('/api/v1/me/notify')
+async def notify_save(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(422, '无效的配置格式')
+    existing = parse_channels(_decrypt_notify(user))
+
+    if 'bark' in body and isinstance(body['bark'], dict):
+        b = body['bark']
+        cur = existing.get('bark', {})
+        new_key = normalize_bark_key(b.get('key', '')) if b.get('key') else cur.get('key', '')
+        if b.get('clear'):
+            existing.pop('bark', None)
+        elif new_key:
+            existing['bark'] = {'enabled': bool(b.get('enabled', True)), 'key': new_key}
+
+    if 'serverchan' in body and isinstance(body['serverchan'], dict):
+        b = body['serverchan']
+        cur = existing.get('serverchan', {})
+        val = (b.get('sendkey') or '').strip() or cur.get('sendkey', '')
+        if b.get('clear'):
+            existing.pop('serverchan', None)
+        elif val:
+            existing['serverchan'] = {'enabled': bool(b.get('enabled', True)), 'sendkey': val}
+
+    if 'pushplus' in body and isinstance(body['pushplus'], dict):
+        b = body['pushplus']
+        cur = existing.get('pushplus', {})
+        val = (b.get('token') or '').strip() or cur.get('token', '')
+        if b.get('clear'):
+            existing.pop('pushplus', None)
+        elif val:
+            existing['pushplus'] = {
+                'enabled': bool(b.get('enabled', True)),
+                'token': val,
+                'topic': (b.get('topic') if b.get('topic') is not None else cur.get('topic', '')).strip(),
+            }
+
+    if 'telegram' in body and isinstance(body['telegram'], dict):
+        b = body['telegram']
+        cur = existing.get('telegram', {})
+        tok = (b.get('bot_token') or '').strip() or cur.get('bot_token', '')
+        cid = str(b.get('chat_id') if b.get('chat_id') is not None else cur.get('chat_id', '')).strip()
+        if b.get('clear'):
+            existing.pop('telegram', None)
+        elif tok and cid:
+            existing['telegram'] = {'enabled': bool(b.get('enabled', True)), 'bot_token': tok, 'chat_id': cid}
+
+    if 'ntfy' in body and isinstance(body['ntfy'], dict):
+        b = body['ntfy']
+        cur = existing.get('ntfy', {})
+        topic = (b.get('topic') if b.get('topic') is not None else cur.get('topic', '')).strip()
+        srv = (b.get('server_url') or cur.get('server_url') or 'https://ntfy.sh').strip()
+        tok = (b.get('token') or '').strip() or cur.get('token', '')
+        if b.get('clear'):
+            existing.pop('ntfy', None)
+        elif topic:
+            existing['ntfy'] = {'enabled': bool(b.get('enabled', True)), 'server_url': srv, 'topic': topic, 'token': tok}
+
+    if 'bot_webhook' in body and isinstance(body['bot_webhook'], dict):
+        b = body['bot_webhook']
+        cur = existing.get('bot_webhook', {})
+        url = (b.get('url') or '').strip() or cur.get('url', '')
+        if b.get('clear'):
+            existing.pop('bot_webhook', None)
+        elif url:
+            existing['bot_webhook'] = {'enabled': bool(b.get('enabled', True)), 'url': url}
+
+    if 'webhook' in body and isinstance(body['webhook'], dict):
+        b = body['webhook']
+        cur = existing.get('webhook', {})
+        url = (b.get('url') or '').strip() or cur.get('url', '')
+        tok = (b.get('token') or '').strip() or cur.get('token', '')
+        if b.get('clear'):
+            existing.pop('webhook', None)
+        elif url:
+            existing['webhook'] = {'enabled': bool(b.get('enabled', True)), 'url': url, 'token': tok}
+
+    user.bark_key = cipher().encrypt(json.dumps(existing).encode()).decode() if existing else None
+    db.commit()
+    return {'ok': True, 'notify_channels': mask_channels_summary(_decrypt_notify(user))}
 
 
 @app.post('/api/v1/me/bark/test')
-def bark_test(request: Request, user: User = Depends(current_user)):
-    throttle(request, 'bark', 3)
-    if not user.bark_key:
-        raise HTTPException(400, '请先保存 Bark Key')
+@app.post('/api/v1/me/notify/test')
+async def bark_test(request: Request, user: User = Depends(current_user)):
+    throttle(request, 'bark', 5)
+    secret_raw = _decrypt_notify(user)
+    if not has_configured_channel(secret_raw):
+        raise HTTPException(400, '请先保存至少一个推送通道配置')
+    only_channel = None
     try:
-        send_bark(cipher().decrypt(user.bark_key.encode()).decode(), 'SPA 测试通知', '卫星过境提醒通道已连接。')
+        data = await request.json()
+        if isinstance(data, dict) and data.get('channel'):
+            only_channel = str(data['channel'])
+    except Exception:
+        pass
+    try:
+        res = dispatch_notifications(secret_raw, 'SPA 测试通知', '卫星过境提醒通道已连接。', only_channel=only_channel)
     except PushError as exc:
         raise HTTPException(502, str(exc))
-    return {'ok': True}
+    return {'ok': True, **res}
 
 
 @app.get('/api/v1/satellites')

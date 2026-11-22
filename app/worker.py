@@ -10,7 +10,7 @@ from .models import User, Satellite, Subscription, Notification, SystemSetting
 from .orbits import predict
 from .catalog import refresh_one
 from .amsat import refresh_status_async
-from .bark import send_bark, PushError
+from .bark import dispatch_notifications, PushError
 from .security import cipher
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def plan(db, now):
     db.commit()
 
 
-def deliver(db, now, sender=send_bark):
+def deliver(db, now, sender=dispatch_notifications):
     db.execute(update(Notification).where(Notification.state == 'pending', Notification.aos <= now).values(state='expired'))
     db.commit()
     rows = db.scalars(select(Notification).where(Notification.state == 'pending',

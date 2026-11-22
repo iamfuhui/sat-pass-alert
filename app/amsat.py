@@ -10,12 +10,12 @@ from .db import SessionLocal, utcnow
 
 URL = 'https://status.amsat.org/'
 COLORS = {
-    '648fff': '转发器活跃',
-    'ffb000': '仅信标/遥测',
-    'dc267f': '未被听到',
-    'fe6100': '报告存在冲突',
+    '648fff': 'Sat/Mode Active',
+    'ffb000': 'Telemetry/Beacon Only',
+    'dc267f': 'Not Heard',
+    'fe6100': 'Conflicting Reports',
 }
-REPORT_MAX_AGE = timedelta(hours=48)
+REPORT_MAX_AGE = timedelta(hours=24)
 _bg_lock = threading.Lock()
 
 
@@ -25,8 +25,7 @@ def _format_report_age(delta: timedelta) -> str:
         return '刚刚报告'
     if mins < 60:
         return f'{mins}分钟前报告'
-    hours = mins // 60
-    return f'{hours}小时前报告'
+    return f'{mins // 60}小时前报告'
 
 
 def parse_status(html, name, now):
@@ -50,13 +49,13 @@ def parse_status(html, name, now):
         tip = re.search(r'tips\.' + re.escape(match[1]) + r"\s*=.*?;(?:\r?\n|$)", html)
         dates = re.findall(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC', tip.group(0) if tip else '')
         if not dates:
-            return '未知（报告时间不可解析）'
+            return '未知（报告时间无法解析）'
         latest = max(datetime.strptime(d, '%Y-%m-%d %H:%M UTC') for d in dates)
         age = now - latest
         if age > REPORT_MAX_AGE or latest > now + timedelta(minutes=5):
-            return '未知（48小时内无报告）'
+            return '未知（24 小时内无报告）'
         return f'{COLORS[color]}（{_format_report_age(age)}）'
-    return '未知（无最近报告）'
+    return '未知（近期无报告）'
 
 
 def refresh_status(db):
@@ -82,7 +81,6 @@ def refresh_status(db):
 
 
 def refresh_status_async():
-    """在后台守护线程中非阻塞刷新 AMSAT 状态。"""
     if not _bg_lock.acquire(blocking=False):
         return
 

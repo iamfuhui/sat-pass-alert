@@ -18,9 +18,10 @@ from .config import settings
 from .db import SessionLocal, get_db, utcnow
 from .models import User, Invite, SystemSetting, Satellite, Subscription, Notification
 from .security import hasher, verify_password, serializer, cipher, current_user, admin_user
-from .schemas import Credentials, Registration, Profile, BarkConfig, SubscriptionInput, OrbitInput, FetchInput, RegistrationMode, Approval
+from .schemas import Credentials, Registration, Profile, BarkConfig, SubscriptionInput, OrbitInput, FetchInput, SyncDefaultsInput, RegistrationMode, Approval
 from .orbits import predict
-from .catalog import save_satellite, refresh_one
+from .catalog import save_satellite, refresh_one, sync_default_satellites
+from .amsat import refresh_status_async
 from .bark import send_bark, PushError
 from .worker import loop
 
@@ -41,7 +42,17 @@ async def lifespan(app):
             db.commit()
     stop = threading.Event()
     worker = threading.Thread(target=loop, args=(stop,), daemon=True)
+    def _bootstrap_catalog():
+        try:
+            with SessionLocal() as bdb:
+                if sync_default_satellites(bdb, source='auto', only_missing=True):
+                    bdb.commit()
+            refresh_status_async()
+        except Exception:
+            pass
+
     if settings.worker_enabled:
+        threading.Thread(target=_bootstrap_catalog, name='catalog-bootstrap', daemon=True).start()
         worker.start()
     yield
     stop.set()
@@ -66,7 +77,7 @@ async def security_headers(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'same-origin'
-    if request.url.path.startswith('/api/'):
+    if request.url.path.startswith('/api/') or not request.url.path.startswith('/assets/'):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -214,10 +225,20 @@ def fetch_orbit(data: FetchInput, request: Request, user: User = Depends(admin_u
     try:
         s = refresh_one(db, **data.model_dump())
         db.commit()
+        refresh_status_async()
         return {'norad_id': s.norad_id, 'name': s.name}
     except (ValueError, KeyError, TypeError, httpx.HTTPError):
         db.rollback()
-        raise HTTPException(502, 'CelesTrak 获取失败；可手动导入 TLE/OMM')
+        raise HTTPException(502, '卫星轨道获取失败；可切换数据源或手动导入 TLE/OMM')
+
+
+@app.post('/api/v1/admin/satellites/sync-defaults')
+def sync_defaults_route(data: SyncDefaultsInput, request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    throttle(request, 'sync_defaults', 10)
+    count = sync_default_satellites(db, source=data.source, only_missing=False)
+    db.commit()
+    refresh_status_async()
+    return {'synced': count}
 
 
 @app.get('/api/v1/subscriptions')

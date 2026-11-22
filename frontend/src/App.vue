@@ -119,9 +119,18 @@ function polarPoint(azDeg, elDeg) {
 function skyplotData(p) {
   const aosPt = polarPoint(p.aos_azimuth, 0)
   const losPt = polarPoint(p.los_azimuth, 0)
-  const peakAz = p.peak_azimuth ?? (((Number(p.aos_azimuth) + Number(p.los_azimuth)) / 2) % 360)
+  let peakAz = p.peak_azimuth
+  if (peakAz == null) {
+    const a1 = (Number(p.aos_azimuth) || 0) * (Math.PI / 180)
+    const a2 = (Number(p.los_azimuth) || 0) * (Math.PI / 180)
+    peakAz = ((Math.atan2(Math.sin(a1) + Math.sin(a2), Math.cos(a1) + Math.cos(a2)) * 180) / Math.PI + 360) % 360
+  }
   const peakPt = polarPoint(peakAz, p.max_elevation)
-  // 二次贝塞尔控制点使曲线经过峰值附近
+  if (Array.isArray(p.track) && p.track.length >= 2) {
+    const pts = p.track.map(([az, el]) => polarPoint(az, el))
+    const path = pts.map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ')
+    return { aos: pts[0], peak: peakPt, los: pts[pts.length - 1], path }
+  }
   const ctrlX = +(2 * peakPt.x - 0.5 * (aosPt.x + losPt.x)).toFixed(1)
   const ctrlY = +(2 * peakPt.y - 0.5 * (aosPt.y + losPt.y)).toFixed(1)
   return {
@@ -219,11 +228,21 @@ async function saveRule(s) {
   }, '订阅规则已保存')
 }
 
+const tleSource = ref('auto')
+
 async function fetchOrbit() {
   await action(async () => {
-    await api('/admin/satellites/fetch', 'POST', { norad_id: norad.value, amsat_name: amsatName.value || null })
+    await api('/admin/satellites/fetch', 'POST', { norad_id: norad.value, amsat_name: amsatName.value || null, source: tleSource.value })
     await refresh()
   }, '卫星轨道已更新')
+}
+
+async function syncDefaultSatellites() {
+  await action(async () => {
+    const res = await api('/admin/satellites/sync-defaults', 'POST', { source: tleSource.value })
+    await refresh()
+    notice.value = `已同步 ${res.synced} 颗常用业余卫星`
+  })
 }
 
 async function importOrbit() {
@@ -501,9 +520,17 @@ onUnmounted(() => {
             <div class="panel">
               <h2>添加 / 刷新卫星</h2>
               <form @submit.prevent="fetchOrbit">
+                <label>星历数据源
+                  <select v-model="tleSource">
+                    <option value="auto">自动（优先 AMSAT 星历库 / CelesTrak）</option>
+                    <option value="amsat">AMSAT 官方星历库 (nasabare.txt)</option>
+                    <option value="celestrak">CelesTrak GP 数据库</option>
+                  </select>
+                </label>
                 <label>NORAD 编号<input v-model.number="norad" type="number" min="1" required></label>
-                <label>AMSAT 精确名称（可选）<input v-model="amsatName" placeholder="ISS_[FM]"></label>
-                <button class="primary" :disabled="busy">从 CelesTrak 获取</button>
+                <label>AMSAT 精确名称（可选）<input v-model="amsatName" placeholder="如 ARISS 或 SO-50 (SaudiSat-1C)"></label>
+                <button class="primary" :disabled="busy">获取并更新卫星</button>
+                <button type="button" :disabled="busy" @click="syncDefaultSatellites">同步 11 颗常用卫星</button>
               </form>
               <details>
                 <summary>手动导入 TLE / OMM</summary>

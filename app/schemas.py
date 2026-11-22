@@ -60,6 +60,11 @@ class OrbitInput(BaseModel):
 class FetchInput(BaseModel):
     norad_id: int = Field(gt=0, le=999999999)
     amsat_name: str | None = Field(default=None, max_length=64)
+    source: Literal['auto', 'celestrak', 'amsat'] = 'auto'
+
+
+class SyncDefaultsInput(BaseModel):
+    source: Literal['auto', 'celestrak', 'amsat'] = 'auto'
 
 
 class RegistrationMode(BaseModel):

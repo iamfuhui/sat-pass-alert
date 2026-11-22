@@ -9,7 +9,7 @@ from .db import SessionLocal, utcnow
 from .models import User, Satellite, Subscription, Notification, SystemSetting
 from .orbits import predict
 from .catalog import refresh_one
-from .amsat import refresh_status
+from .amsat import refresh_status_async
 from .bark import send_bark, PushError
 from .security import cipher
 
@@ -71,11 +71,12 @@ def deliver(db, now, sender=send_bark):
     rows = db.scalars(select(Notification).where(Notification.state == 'pending',
         Notification.due_at <= now).order_by(Notification.due_at).limit(100)).all()
     for n in rows:
+        cur_now = utcnow()
         user = db.get(User, n.user_id)
         sub = db.scalar(select(Subscription).where(Subscription.user_id == n.user_id,
             Subscription.norad_id == n.norad_id, Subscription.enabled.is_(True)))
-        if n.aos <= now or not user or not user.approved or not user.bark_key or not sub:
-            n.state = 'expired' if n.aos <= now else 'cancelled'
+        if n.aos <= cur_now or not user or not user.approved or not user.bark_key or not sub:
+            n.state = 'expired' if n.aos <= cur_now else 'cancelled'
             db.commit()
             continue
         claimed = db.execute(update(Notification).where(Notification.id == n.id,
@@ -85,12 +86,12 @@ def deliver(db, now, sender=send_bark):
             continue
         try:
             sender(cipher().decrypt(user.bark_key.encode()).decode(), n.title, n.body)
-            n.state, n.sent_at, n.last_error = 'sent', now, None
+            n.state, n.sent_at, n.last_error = 'sent', utcnow(), None
         except (PushError, InvalidToken):
             db.refresh(n)
             n.last_error = '推送失败；检查 Bark 配置或网络'
             n.state = 'failed' if n.attempts >= 3 else 'pending'
-            n.due_at = now + timedelta(seconds=60 * 2 ** n.attempts)
+            n.due_at = utcnow() + timedelta(seconds=60 * 2 ** n.attempts)
         db.commit()
 
 
@@ -112,6 +113,33 @@ def run_tick():
         tick_lock.release()
 
 
+_orbit_lock = threading.Lock()
+
+
+def _refresh_stale_orbits_async(stop, cutoff):
+    if not _orbit_lock.acquire(blocking=False):
+        return
+
+    def _run():
+        try:
+            with SessionLocal() as db:
+                ids = db.scalars(select(Satellite.norad_id).where(
+                    Satellite.fetched_at < cutoff)).all()
+                for norad_id in ids:
+                    if stop.is_set():
+                        break
+                    try:
+                        refresh_one(db, norad_id, source='auto')
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        log.warning('Orbit refresh failed for NORAD %s', norad_id)
+        finally:
+            _orbit_lock.release()
+
+    threading.Thread(target=_run, name='orbit-refresh', daemon=True).start()
+
+
 def loop(stop):
     last_refresh = None
     last_amsat = None
@@ -119,23 +147,11 @@ def loop(stop):
         try:
             now = utcnow()
             if last_amsat is None or now - last_amsat > timedelta(hours=1):
-                with SessionLocal() as db:
-                    refresh_status(db)
+                refresh_status_async()
                 last_amsat = now
             run_tick()
             if last_refresh is None or now - last_refresh > timedelta(hours=6):
-                with SessionLocal() as db:
-                    ids = db.scalars(select(Satellite.norad_id).where(
-                        Satellite.fetched_at < now - timedelta(hours=6))).all()
-                    for norad_id in ids:
-                        if stop.is_set():
-                            break
-                        try:
-                            refresh_one(db, norad_id)
-                            db.commit()
-                        except Exception:
-                            db.rollback()
-                            log.warning('Orbit refresh failed for NORAD %s', norad_id)
+                _refresh_stale_orbits_async(stop, now - timedelta(hours=6))
                 last_refresh = now
         except Exception:
             log.exception('Worker tick failed')

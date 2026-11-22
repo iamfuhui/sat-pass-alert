@@ -3,8 +3,8 @@ from sqlalchemy import select
 import httpx
 import pytest
 from app.bark import send_bark, PushError
-from app.db import SessionLocal, utcnow
-from app.models import User, Satellite, Subscription, Notification
+from app.db import SessionLocal
+from app.models import User, Subscription, Notification
 from app.security import cipher
 from app.worker import plan, deliver
 from app.catalog import save_satellite
@@ -22,6 +22,10 @@ def seed(db):
     return user
 
 
+def deliver_at(db, now, sender):
+    deliver(db, now, sender, clock=lambda: now)
+
+
 def test_planning_deduplicates_jitter_and_sends_once():
     with SessionLocal() as db:
         seed(db)
@@ -34,8 +38,8 @@ def test_planning_deduplicates_jitter_and_sends_once():
         assert len(db.scalars(select(Notification)).all()) == count
         n=first[0]
         calls=[]
-        deliver(db,n.due_at,lambda *args:calls.append(args))
-        deliver(db,n.due_at+timedelta(seconds=1),lambda *args:calls.append(args))
+        deliver_at(db,n.due_at,lambda *args:calls.append(args))
+        deliver_at(db,n.due_at+timedelta(seconds=1),lambda *args:calls.append(args))
         assert len(calls)==1
         assert n.state=='sent'
 
@@ -47,15 +51,15 @@ def test_retry_and_expiration():
         plan(db,now)
         n=db.scalar(select(Notification).order_by(Notification.aos))
         def fail(*args): raise PushError('fail')
-        deliver(db,n.due_at,fail)
+        deliver_at(db,n.due_at,fail)
         assert n.state=='pending' and n.attempts==1
-        deliver(db,n.due_at,fail)
+        deliver_at(db,n.due_at,fail)
         assert n.attempts==2
-        deliver(db,n.due_at,fail)
+        deliver_at(db,n.due_at,fail)
         assert n.state=='failed' and n.attempts==3
         n.state='pending'
         db.commit()
-        deliver(db,n.aos,fail)
+        deliver_at(db,n.aos,fail)
         assert n.state=='expired'
 
 
@@ -66,8 +70,65 @@ def test_disabled_subscription_never_sends():
         n=db.scalar(select(Notification).order_by(Notification.aos))
         db.scalar(select(Subscription)).enabled=False
         db.commit()
-        deliver(db,n.due_at,lambda *args:pytest.fail('must not send'))
+        deliver_at(db,n.due_at,lambda *args:pytest.fail('must not send'))
         assert n.state=='cancelled'
+
+
+def test_slow_send_expires_next_reminder_at_aos_and_records_completion():
+    with SessionLocal() as db:
+        user = seed(db)
+        now = START.replace(tzinfo=None)
+        first = Notification(user_id=user.id, norad_id=25544, title='first', body='test',
+            due_at=now - timedelta(seconds=2), aos=now + timedelta(seconds=3))
+        second = Notification(user_id=user.id, norad_id=25544, title='second', body='test',
+            due_at=now - timedelta(seconds=1), aos=now + timedelta(seconds=8))
+        db.add_all([first, second])
+        db.commit()
+        calls = []
+
+        def send(secret, title, body):
+            nonlocal now
+            calls.append(title)
+            now += timedelta(seconds=8)
+
+        deliver(db, now, send, clock=lambda: now)
+
+        assert calls == ['first']
+        assert first.state == 'sent' and first.sent_at == now
+        assert second.state == 'expired' and second.attempts == 0
+
+
+def test_claim_crossing_aos_does_not_start_send():
+    with SessionLocal() as db:
+        user = seed(db)
+        now = START.replace(tzinfo=None)
+        notification = Notification(user_id=user.id, norad_id=25544, title='test', body='test',
+            due_at=now, aos=now + timedelta(seconds=1))
+        db.add(notification)
+        db.commit()
+
+        times = iter((now, notification.aos))
+        deliver(db, now, lambda *args: pytest.fail('must not send'), clock=times.__next__)
+
+        assert notification.state == 'expired' and notification.attempts == 0
+
+
+def test_retry_is_scheduled_from_failure_completion():
+    with SessionLocal() as db:
+        seed(db)
+        plan(db, START.replace(tzinfo=None))
+        notification = db.scalar(select(Notification).order_by(Notification.aos))
+        now = notification.due_at
+
+        def fail(*args):
+            nonlocal now
+            now += timedelta(seconds=8)
+            raise PushError('test')
+
+        deliver(db, now, fail, clock=lambda: now)
+
+        assert notification.state == 'pending'
+        assert notification.due_at == now + timedelta(minutes=2)
 
 
 def test_bark_payload_and_failures():
@@ -91,7 +152,7 @@ def test_replanning_preserves_retry_backoff_and_cancels_stale_orbits():
         plan(db,now)
         n=db.scalar(select(Notification).order_by(Notification.aos))
         def fail(*args): raise PushError('fail')
-        deliver(db,n.due_at,fail)
+        deliver_at(db,n.due_at,fail)
         retry_at=n.due_at
         plan(db,retry_at-timedelta(seconds=30))
         assert n.due_at==retry_at

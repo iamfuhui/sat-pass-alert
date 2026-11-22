@@ -17,7 +17,7 @@ Self-hosted satellite pass forecasts and notifications for amateur radio operato
 
 ### 语言支持
 
-简体中文、英语和日语支持正在开发。GitHub 主分支当前提供简体中文界面，三语界面和通知语言将在功能合入并验证后更新。
+支持**简体中文、English 和日本語**。从页面右上角切换语言。登录后，语言偏好保存在账户中，测试通知和后续卫星过境提醒会使用该语言。部分服务端错误与第三方渠道返回的原始信息仍可能显示中文或上游原文。
 
 ## Docker Compose 快速开始
 

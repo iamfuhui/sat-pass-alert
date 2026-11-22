@@ -24,6 +24,7 @@ from .orbits import predict
 from .catalog import save_satellite, refresh_one, sync_default_satellites
 from .amsat import refresh_status_async
 from .bark import dispatch_notifications, has_configured_channel, mask_channels_summary, normalize_bark_key, parse_channels, PushError
+from .worker import get_user_lang, SUPPORTED_LANGS
 from .worker import loop
 
 
@@ -121,6 +122,7 @@ def profile(user: User):
         'timezone': user.timezone,
         'bark_configured': has_configured_channel(secret_raw),
         'notify_channels': mask_channels_summary(secret_raw),
+        'lang': get_user_lang(secret_raw, default=None),
     }
 def cancel_pending(db, user_id, norad_id=None):
     query = update(Notification).where(Notification.user_id == user_id, Notification.state == 'pending')
@@ -292,9 +294,14 @@ async def notify_save(request: Request, user: User = Depends(current_user), db: 
         elif url:
             existing['webhook'] = {'enabled': bool(b.get('enabled', True)), 'url': url, 'token': tok}
 
+    if 'lang' in body:
+        if body['lang'] not in SUPPORTED_LANGS:
+            raise HTTPException(422, 'Unsupported notification language')
+        existing['_lang'] = body['lang']
     user.bark_key = cipher().encrypt(json.dumps(existing).encode()).decode() if existing else None
     db.commit()
-    return {'ok': True, 'notify_channels': mask_channels_summary(_decrypt_notify(user))}
+    return {'ok': True, 'lang': get_user_lang(_decrypt_notify(user), default=None),
+            'notify_channels': mask_channels_summary(_decrypt_notify(user))}
 
 
 @app.post('/api/v1/me/bark/test')
@@ -312,7 +319,9 @@ async def bark_test(request: Request, user: User = Depends(current_user)):
     except Exception:
         pass
     try:
-        res = dispatch_notifications(secret_raw, 'SPA 测试通知', '卫星过境提醒通道已连接。', only_channel=only_channel)
+        t_map = {'zh-CN': ('SPA \u6d4b\u8bd5\u901a\u77e5', '\u536b\u661f\u8fc7\u5883\u63d0\u9192\u901a\u9053\u5df2\u8fde\u63a5\u3002'), 'en': ('SPA Test Notification', 'Satellite pass alert channel is connected.'), 'ja': ('SPA \u30c6\u30b9\u30c8\u901a\u77e5', '\u885b\u661f\u30d1\u30b9\u901a\u77e5\u30c1\u30e3\u30f3\u30cd\u30eb\u304c\u63a5\u7d9a\u3055\u308c\u307e\u3057\u305f\u3002')}
+        tt, tb = t_map.get(get_user_lang(secret_raw), t_map['zh-CN'])
+        res = dispatch_notifications(secret_raw, tt, tb, only_channel=only_channel)
     except PushError as exc:
         raise HTTPException(502, str(exc))
     return {'ok': True, **res}

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { displayTime } from './time.js'
+import { LANG_OPTIONS, currentLang, setCurrentLang, t, translateAmsat } from './i18n.js'
 import { gridCenter } from './locator.js'
 
 const user = ref(null), page = ref('passes'), error = ref(''), notice = ref(''), busy = ref(false)
@@ -39,7 +40,7 @@ function syncNotifyForm(u) {
 
 async function saveNotifyChannels() {
   await action(async () => {
-    await api('/me/notify', 'PUT', notifyForm)
+    await api('/me/notify', 'PUT', { ...notifyForm, lang: currentLang.value })
     const u = await api('/me')
     setUser(u)
     syncNotifyForm(u)
@@ -52,13 +53,13 @@ async function saveNotifyChannels() {
     notifyForm.webhook.url = ''
     notifyForm.webhook.token = ''
     for (const k of Object.keys(notifyForm)) notifyForm[k].clear = false
-  }, '推送通道设置已保存')
+  }, t('channel_label_13'))
 }
 
 async function testNotifyChannel(channel = null) {
   await action(async () => {
     const res = await api('/me/notify/test', 'POST', channel ? { channel } : {})
-    notice.value = res.errors?.length ? `部分成功（${res.errors.join('；')}）` : '测试通知已发送，请检查接收端'
+    notice.value = res.errors?.length ? t('test_partial', { err: res.errors.join('; ') }) : t('test_sent')
   })
 }
 const satellites = ref([]), subscriptions = ref([]), passes = ref([]), warnings = ref([]), logs = ref([]), users = ref([])
@@ -216,7 +217,7 @@ async function action(fn, message = '') {
   busy.value = true; error.value = ''; notice.value = ''
   try {
     await fn()
-    notice.value = message
+    if (message) notice.value = message
   } catch (e) {
     error.value = e.message
   } finally {
@@ -224,8 +225,21 @@ async function action(fn, message = '') {
   }
 }
 
+async function saveLanguage(code) {
+  if (user.value) {
+    const res = await api('/me/notify', 'PUT', { lang: code })
+    user.value.lang = res.lang
+  }
+  setCurrentLang(code)
+}
+
+async function switchLanguage(code) {
+  await action(() => saveLanguage(code))
+}
+
 function setUser(value) {
   user.value = value
+  if (value.lang) setCurrentLang(value.lang)
   syncNotifyForm(value)
   for (const key in station) {
     station[key] = value[key] ?? (key === 'locator' ? '' : station[key])
@@ -256,6 +270,7 @@ async function refresh() {
 async function login() {
   await action(async () => {
     setUser(await api('/auth/login', 'POST', auth))
+    if (!user.value.lang) await saveLanguage(currentLang.value)
     auth.password = ''
     await refresh()
   })
@@ -322,6 +337,7 @@ function time(v) {
 }
 
 onMounted(async () => {
+  setCurrentLang(currentLang.value)
   clockTimer = setInterval(() => {
     nowMs.value = Date.now()
   }, 1000)
@@ -331,6 +347,7 @@ onMounted(async () => {
     const res = await fetch('/api/v1/me')
     if (res.ok) {
       setUser(await res.json())
+      if (!user.value.lang) await saveLanguage(currentLang.value)
       await refresh()
     }
   })
@@ -348,7 +365,7 @@ onUnmounted(() => {
       <div class="sidebar-caption">AMATEUR RADIO · ORBIT WATCH</div>
       <nav v-if="user" aria-label="主导航">
         <button
-          v-for="item in [{id:'passes',name:'过境预报'},{id:'satellites',name:'卫星订阅'},{id:'station',name:'电台站设置'},{id:'logs',name:'通知记录'},...(user.is_admin?[{id:'admin',name:'系统管理'}]:[])]"
+          v-for="item in [{id:'passes',name:t('nav_passes')},{id:'satellites',name:t('nav_satellites')},{id:'station',name:t('nav_station')},{id:'logs',name:t('nav_logs')},...(user.is_admin?[{id:'admin',name:t('nav_admin')}]:[])]"
           :key="item.id"
           :class="{ active: page === item.id }"
           @click="page = item.id"
@@ -359,27 +376,34 @@ onUnmounted(() => {
 
     <main>
       <header class="topbar">
-        <span>卫星过境提醒</span>
-        <div v-if="user">{{ user.username }} <button class="quiet" @click="action(async () => { await api('/auth/logout', 'POST'); user = null })">退出</button></div>
-        <span v-else>SPA / v0.1</span>
+        <span>{{ t('app_title') }}</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="lang-switch" role="group" aria-label="Language" style="display:inline-flex;gap:4px">
+            <button v-for="opt in LANG_OPTIONS" :key="opt.code" type="button" class="quiet"
+              :style="currentLang === opt.code ? 'font-weight:700;text-decoration:underline;opacity:1' : 'opacity:0.65'"
+              :disabled="busy" @click="switchLanguage(opt.code)">{{ opt.label }}</button>
+          </div>
+          <div v-if="user">{{ user.username }} <button class="quiet" @click="action(async () => { await api('/auth/logout', 'POST'); user = null })">{{ t('logout') }}</button></div>
+          <span v-else>SPA / v0.1</span>
+        </div>
       </header>
 
       <p v-if="error" class="alert error" role="alert">{{ error }}</p>
       <p v-if="notice" class="alert success" role="status">{{ notice }}</p>
-      <p v-if="busy" class="loading" role="status">正在处理…</p>
+      <p v-if="busy" class="loading" role="status">{{ t('processing') }}</p>
 
       <section v-if="!user" class="login">
         <div class="eyebrow">YOUR STATION. YOUR SKY.</div>
-        <h1>不错过下一次过境。</h1>
-        <p class="muted">设置观测位置、订阅卫星，在升起前接收 Bark 提醒。</p>
+        <h1>{{ t('login_title') }}</h1>
+        <p class="muted">{{ t('login_desc') }}</p>
         <form class="panel auth" @submit.prevent="signingUp ? register() : login()">
-          <h2>{{ signingUp ? '创建账号' : '登录观测站' }}</h2>
-          <label>用户名<input v-model="auth.username" autocomplete="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+"></label>
-          <label>密码<input v-model="auth.password" type="password" :autocomplete="signingUp ? 'new-password' : 'current-password'" required minlength="12" maxlength="128"></label>
-          <label v-if="signingUp && registerMode === 'invite'">邀请码<input v-model="auth.invite" required></label>
-          <button :disabled="busy" class="primary">{{ signingUp ? '提交注册' : '登录' }}</button>
-          <button v-if="registerMode !== 'closed'" type="button" class="quiet" @click="signingUp = !signingUp">{{ signingUp ? '返回登录' : '创建账号' }}</button>
-          <p v-else class="muted">本站已关闭注册，请联系管理员。</p>
+          <h2>{{ signingUp ? t('create_account') : t('login_station') }}</h2>
+          <label>{{ t('username') }}<input v-model="auth.username" autocomplete="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+"></label>
+          <label>{{ t('password') }}<input v-model="auth.password" type="password" :autocomplete="signingUp ? 'new-password' : 'current-password'" required minlength="12" maxlength="128"></label>
+          <label v-if="signingUp && registerMode === 'invite'">{{ t('invite_code') }}<input v-model="auth.invite" required></label>
+          <button :disabled="busy" class="primary">{{ signingUp ? t('submit_register') : t('login_btn') }}</button>
+          <button v-if="registerMode !== 'closed'" type="button" class="quiet" @click="signingUp = !signingUp">{{ signingUp ? t('back_login') : t('create_account') }}</button>
+          <p v-else class="muted">{{ t('reg_closed_hint') }}</p>
         </form>
       </section>
 
@@ -389,51 +413,51 @@ onUnmounted(() => {
           <div class="section-head">
             <div>
               <div class="eyebrow">PASS FORECAST</div>
-              <h1>过境预报</h1>
-              <p class="muted">时间以 {{ user.timezone }} 显示 · 地平线升起 / 落下</p>
+              <h1>{{ t('nav_passes') }}</h1>
+              <p class="muted">{{ t('passes_subtitle', { tz: user.timezone }) }}</p>
             </div>
-            <button :disabled="busy" @click="action(refresh)">刷新预报</button>
+            <button :disabled="busy" @click="action(refresh)">{{ t('refresh_passes') }}</button>
           </div>
 
           <div class="stats">
-            <div><span>已启用订阅</span><strong>{{ selectedCount }} <small>颗</small></strong></div>
-            <div><span>符合筛选 / 总过境</span><strong>{{ filteredPasses.length }} <small>/ {{ passes.length }} 次</small></strong></div>
-            <div><span>观测位置</span><strong class="coordinate">{{ user.locator || `${user.latitude}°, ${user.longitude}°` }}</strong></div>
+            <div><span>{{ t('stat_enabled') }}</span><strong>{{ selectedCount }} <small>{{ t('stat_enabled_unit') }}</small></strong></div>
+            <div><span>{{ t('stat_filtered') }}</span><strong>{{ filteredPasses.length }} <small>{{ t('stat_filtered_unit', { total: passes.length }) }}</small></strong></div>
+            <div><span>{{ t('stat_location') }}</span><strong class="coordinate">{{ user.locator || `${user.latitude}°, ${user.longitude}°` }}</strong></div>
           </div>
 
           <!-- 筛选栏 -->
           <div class="panel filter-bar">
-            <label class="inline">预测范围
+            <label class="inline">{{ t('filter_range') }}
               <select v-model.number="hours" @change="action(refresh)">
-                <option :value="24">未来 24 小时</option>
-                <option :value="48">未来 48 小时</option>
-                <option :value="72">未来 72 小时</option>
+                <option :value="24">{{ t('hours_24') }}</option>
+                <option :value="48">{{ t('hours_48') }}</option>
+                <option :value="72">{{ t('hours_72') }}</option>
               </select>
             </label>
-            <label class="inline">卫星筛选
+            <label class="inline">{{ t('filter_sat') }}
               <select v-model="filterSat">
-                <option value="all">全部已订阅卫星</option>
+                <option value="all">{{ t('all_subscribed') }}</option>
                 <option v-for="opt in passSatOptions" :key="opt.norad_id" :value="opt.norad_id">{{ opt.name }} ({{ opt.norad_id }})</option>
               </select>
             </label>
-            <label class="inline">最低最高仰角
+            <label class="inline">{{ t('filter_min_el') }}
               <select v-model.number="filterMinEl">
-                <option :value="0">不限仰角</option>
+                <option :value="0">{{ t('el_any') }}</option>
                 <option :value="20">≥ 20°</option>
-                <option :value="30">≥ 30° (推荐)</option>
-                <option :value="45">≥ 45° (高仰角)</option>
-                <option :value="60">≥ 60° (过顶)</option>
+                <option :value="30">{{ t('el_30') }}</option>
+                <option :value="45">{{ t('el_45') }}</option>
+                <option :value="60">{{ t('el_60') }}</option>
               </select>
             </label>
-            <label class="check inline"><input v-model="hidePast" type="checkbox">隐藏已过境</label>
+            <label class="check inline"><input v-model="hidePast" type="checkbox">{{ t('hide_past') }}</label>
           </div>
 
           <p v-for="w in warnings" :key="w" class="alert error">{{ w }}</p>
 
           <div v-if="!filteredPasses.length" class="panel empty">
-            <h2>暂无符合当前筛选条件的过境</h2>
-            <p>可放宽仰角/卫星筛选条件、取消“隐藏已过境”，或前往管理卫星订阅。</p>
-            <button @click="page = 'satellites'">管理卫星订阅</button>
+            <h2>{{ t('no_passes_title') }}</h2>
+            <p>{{ t('no_passes_desc') }}</p>
+            <button @click="page = 'satellites'">{{ t('manage_subs') }}</button>
           </div>
 
           <article
@@ -448,30 +472,30 @@ onUnmounted(() => {
                 <span class="status-pill" :class="passStatus(p).state">{{ passStatus(p).label }}</span>
               </div>
               <h2>{{ p.name }}</h2>
-              <span class="muted">AMSAT · {{ p.amsat_status }} · {{ passStatus(p).detail }}</span>
+              <span class="muted">AMSAT · {{ translateAmsat(p.amsat_status) }} · {{ passStatus(p).detail }}</span>
             </div>
 
             <div>
-              <span class="muted">升起 AOS</span>
+              <span class="muted">{{ t('aos_label') }}</span>
               <strong>{{ time(p.aos) }}</strong>
-              <small>方位 {{ p.aos_azimuth }}° {{ compassDir(p.aos_azimuth) }}</small>
+              <small>{{ t('az_label', { az: p.aos_azimuth, dir: compassDir(p.aos_azimuth) }) }}</small>
             </div>
 
             <div>
-              <span class="muted">最高仰角</span>
+              <span class="muted">{{ t('max_el_label') }}</span>
               <strong class="accent">{{ p.max_elevation }}°</strong>
               <small>{{ time(p.peak_at) }}</small>
             </div>
 
             <div>
-              <span class="muted">落下 LOS</span>
+              <span class="muted">{{ t('los_label') }}</span>
               <strong>{{ time(p.los) }}</strong>
-              <small>方位 {{ p.los_azimuth }}° {{ compassDir(p.los_azimuth) }}</small>
+              <small>{{ t('az_label', { az: p.los_azimuth, dir: compassDir(p.los_azimuth) }) }}</small>
             </div>
 
             <!-- SVG 极坐标雷达图 -->
-            <div class="skyplot-wrap" title="极坐标过境轨迹图（外圈 0°，内圈 30°/60°）">
-              <svg viewBox="0 0 124 124" class="skyplot" aria-label="过境极坐标轨迹图">
+            <div class="skyplot-wrap" :title="t('skyplot_tip')">
+              <svg viewBox="0 0 124 124" class="skyplot" :aria-label="t('channel_label_12')">
                 <circle cx="62" cy="62" r="48" class="sky-ring" />
                 <circle cx="62" cy="62" r="32" class="sky-ring dashed" />
                 <circle cx="62" cy="62" r="16" class="sky-ring dashed" />
@@ -489,36 +513,36 @@ onUnmounted(() => {
             </div>
           </article>
 
-          <p class="muted footnote">轨道预测存在误差。AMSAT 为用户报告，仅附加到通知，不作为推送过滤条件。轨迹图中绿点为 AOS、黄点为最高点、红点为 LOS。</p>
+          <p class="muted footnote">{{ t('footnote') }}</p>
         </section>
 
         <!-- 2. 卫星订阅 -->
         <section v-if="page === 'satellites'">
           <div class="eyebrow">SATELLITE CATALOG</div>
-          <h1>卫星订阅</h1>
-          <p class="muted">按整次过境的最高仰角筛选，提醒时间相对地平线 AOS 提前。</p>
+          <h1>{{ t('nav_satellites') }}</h1>
+          <p class="muted">{{ t('sat_desc') }}</p>
 
           <div class="panel filter-bar">
-            <label class="inline search-box">搜索卫星
-              <input v-model="satQuery" type="search" placeholder="输入卫星名称（如 ISS / RS-44）或 NORAD 编号…">
+            <label class="inline search-box">{{ t('search_sat') }}
+              <input v-model="satQuery" type="search" :placeholder="t('search_sat_ph')">
             </label>
-            <label class="check inline"><input v-model="satOnlyEnabled" type="checkbox">仅显示已启用 ({{ selectedCount }})</label>
+            <label class="check inline"><input v-model="satOnlyEnabled" type="checkbox">{{ t('only_enabled', { count: selectedCount }) }}</label>
           </div>
 
-          <div v-if="!satellites.length" class="panel empty">卫星目录为空。请管理员按 NORAD 编号添加或导入轨道。</div>
-          <div v-else-if="!filteredSatellites.length" class="panel empty">没有匹配当前搜索条件的卫星。</div>
+          <div v-if="!satellites.length" class="panel empty">{{ t('sat_empty') }}</div>
+          <div v-else-if="!filteredSatellites.length" class="panel empty">{{ t('sat_no_match') }}</div>
 
           <form v-for="s in filteredSatellites" :key="s.norad_id" class="panel satellite" @submit.prevent="saveRule(s)">
             <div>
               <h2>{{ s.name }}</h2>
-              <p class="muted">NORAD {{ s.norad_id }} · 轨道历元 {{ time(s.epoch) }}</p>
+              <p class="muted">NORAD {{ s.norad_id }} · {{ t('orbit_epoch') }} {{ time(s.epoch) }}</p>
             </div>
-            <label>最低最高仰角（°）<input v-model.number="s.rule.min_elevation" type="number" min="0" max="90" step="1" required></label>
-            <label>提前提醒（分钟）<input v-model.number="s.rule.lead_minutes" type="number" min="1" max="120" required></label>
-            <label class="check"><input v-model="s.rule.enabled" type="checkbox">启用订阅</label>
+            <label>{{ t('rule_min_el') }}<input v-model.number="s.rule.min_elevation" type="number" min="0" max="90" step="1" required></label>
+            <label>{{ t('rule_lead') }}<input v-model.number="s.rule.lead_minutes" type="number" min="1" max="120" required></label>
+            <label class="check"><input v-model="s.rule.enabled" type="checkbox">{{ t('rule_enabled') }}</label>
             <div class="sat-actions">
-              <button class="primary" :disabled="busy">保存</button>
-              <button v-if="user.is_admin" type="button" class="danger" :disabled="busy" @click="deleteSatellite(s)">删除</button>
+              <button class="primary" :disabled="busy">{{ t('save') }}</button>
+              <button v-if="user.is_admin" type="button" class="danger" :disabled="busy" @click="deleteSatellite(s)">{{ t('delete') }}</button>
             </div>
           </form>
         </section>
@@ -526,89 +550,89 @@ onUnmounted(() => {
         <!-- 3. 观测站与推送 -->
         <section v-if="page === 'station'">
           <div class="eyebrow">STATION SETTINGS</div>
-          <h1>电台站设置</h1>
+          <h1>{{ t('nav_station') }}</h1>
           <div class="columns">
             <form class="panel" @submit.prevent="saveStation">
-              <h2>观测位置</h2>
-              <p class="muted">纬度北正南负，经度东正西负。</p>
-              <label>Maidenhead 网格定位（4 / 6 / 8 位）
-                <input v-model="station.locator" @input="updateGrid" placeholder="例如 OM21、OM21EC、OM21EC24" maxlength="8" autocomplete="off" spellcheck="false" :aria-invalid="!!gridError" aria-describedby="grid-help">
+              <h2>{{ t('obs_location') }}</h2>
+              <p class="muted">{{ t('lat_lon_hint') }}</p>
+              <label>{{ t('grid_label') }}
+                <input v-model="station.locator" @input="updateGrid" :placeholder="t('grid_ph')" maxlength="8" autocomplete="off" spellcheck="false" :aria-invalid="!!gridError" aria-describedby="grid-help">
               </label>
-              <p id="grid-help" class="muted">输入有效定位后自动使用网格中心经纬度。4 位范围较大，建议使用 6 或 8 位；不改变海拔。</p>
+              <p id="grid-help" class="muted">{{ t('grid_help') }}</p>
               <p v-if="gridError" class="alert error" role="alert">{{ gridError }}</p>
-              <label>纬度<input @input="manualCoordinates" v-model.number="station.latitude" type="number" min="-90" max="90" step="any" required></label>
-              <label>经度<input @input="manualCoordinates" v-model.number="station.longitude" type="number" min="-180" max="180" step="any" required></label>
-              <label>海拔（米）<input v-model.number="station.altitude_m" type="number" min="-500" max="10000" step="any" required></label>
-              <label>显示时区<input v-model="station.timezone" placeholder="Asia/Shanghai" required></label>
-              <button class="primary" :disabled="busy || !!gridError">保存电台站设置</button>
+              <label>{{ t('latitude') }}<input @input="manualCoordinates" v-model.number="station.latitude" type="number" min="-90" max="90" step="any" required></label>
+              <label>{{ t('longitude') }}<input @input="manualCoordinates" v-model.number="station.longitude" type="number" min="-180" max="180" step="any" required></label>
+              <label>{{ t('altitude') }}<input v-model.number="station.altitude_m" type="number" min="-500" max="10000" step="any" required></label>
+              <label>{{ t('timezone') }}<input v-model="station.timezone" placeholder="Asia/Shanghai" required></label>
+              <button class="primary" :disabled="busy || !!gridError">{{ t('save_station') }}</button>
             </form>
 
             <form class="panel" @submit.prevent="saveNotifyChannels">
-  <h2>多通道消息推送</h2>
-  <span class="badge">{{ user.bark_configured ? '已配置通道' : '未配置' }}</span>
-  <p class="muted">支持同时开启多个推送服务；已保存的密钥留空则保持不变。</p>
+  <h2>{{ t('multi_push') }}</h2>
+  <span class="badge">{{ user.bark_configured ? t('configured_badge') : t('unconfigured') }}</span>
+  <p class="muted">{{ t('multi_push_desc') }}</p><p class="muted">{{ t('push_lang_hint', { lang: currentLang }) }}</p>
   <details open class="notify-group">
     <summary><strong>Bark（iOS / macOS）</strong> ·
-      <small>{{ user.notify_channels?.bark?.configured ? '已配置' : '未配置' }}</small>
+      <small>{{ user.notify_channels?.bark?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
-      <input v-model="notifyForm.bark.enabled" type="checkbox">启用 Bark
+      <input v-model="notifyForm.bark.enabled" type="checkbox">{{ t('enable_channel', { channel: 'Bark' }) }}
     </label>
-    <label>设备 Key 或完整链接
+    <label>{{ t('channel_label_0') }}
       <input v-model="notifyForm.bark.key" type="password"
         placeholder="Key 或 https://api.day.app/Key/" autocomplete="off">
     </label>
     <label v-if="user.notify_channels?.bark?.configured" class="check">
-      <input v-model="notifyForm.bark.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.bark.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.bark?.configured"
-      @click="testNotifyChannel('bark')">测试 Bark</button>
+      @click="testNotifyChannel('bark')">{{ t('test_channel', { channel: 'Bark' }) }}</button>
   </details>
   <details class="notify-group">
     <summary><strong>Server酱 Turbo（微信）</strong> ·
-      <small>{{ user.notify_channels?.serverchan?.configured ? '已配置' : '未配置' }}</small>
+      <small>{{ user.notify_channels?.serverchan?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
-      <input v-model="notifyForm.serverchan.enabled" type="checkbox">启用 Server酱
+      <input v-model="notifyForm.serverchan.enabled" type="checkbox">{{ t('enable_channel', { channel: 'Server酱' }) }}
     </label>
     <label>SendKey
       <input v-model="notifyForm.serverchan.sendkey" type="password"
         placeholder="SCT..." autocomplete="off">
     </label>
     <label v-if="user.notify_channels?.serverchan?.configured" class="check">
-      <input v-model="notifyForm.serverchan.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.serverchan.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.serverchan?.configured"
-      @click="testNotifyChannel('serverchan')">测试 Server酱</button>
+      @click="testNotifyChannel('serverchan')">{{ t('test_channel', { channel: 'Server酱' }) }}</button>
   </details>
   <details class="notify-group">
     <summary><strong>PushPlus 推送加</strong> ·
-      <small>{{ user.notify_channels?.pushplus?.configured ? '已配置' : '未配置' }}</small>
+      <small>{{ user.notify_channels?.pushplus?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
-      <input v-model="notifyForm.pushplus.enabled" type="checkbox">启用 PushPlus
+      <input v-model="notifyForm.pushplus.enabled" type="checkbox">{{ t('enable_channel', { channel: 'PushPlus' }) }}
     </label>
     <label>Token
       <input v-model="notifyForm.pushplus.token" type="password" autocomplete="off">
     </label>
-    <label>群组 Topic（可选）
+    <label>{{ t('channel_label_1') }}
       <input v-model="notifyForm.pushplus.topic" placeholder="一对一留空">
     </label>
     <label v-if="user.notify_channels?.pushplus?.configured" class="check">
-      <input v-model="notifyForm.pushplus.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.pushplus.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.pushplus?.configured"
-      @click="testNotifyChannel('pushplus')">测试 PushPlus</button>
+      @click="testNotifyChannel('pushplus')">{{ t('test_channel', { channel: 'PushPlus' }) }}</button>
   </details>
   <details class="notify-group">
     <summary><strong>Telegram Bot</strong> ·
-      <small>{{ user.notify_channels?.telegram?.configured ? '已配置' : '未配置' }}</small>
+      <small>{{ user.notify_channels?.telegram?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
-      <input v-model="notifyForm.telegram.enabled" type="checkbox">启用 Telegram
+      <input v-model="notifyForm.telegram.enabled" type="checkbox">{{ t('enable_channel', { channel: 'Telegram' }) }}
     </label>
     <label>Bot Token
       <input v-model="notifyForm.telegram.bot_token" type="password"
@@ -618,38 +642,38 @@ onUnmounted(() => {
       <input v-model="notifyForm.telegram.chat_id" placeholder="用户或群组 ID">
     </label>
     <label v-if="user.notify_channels?.telegram?.configured" class="check">
-      <input v-model="notifyForm.telegram.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.telegram.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.telegram?.configured"
-      @click="testNotifyChannel('telegram')">测试 Telegram</button>
+      @click="testNotifyChannel('telegram')">{{ t('test_channel', { channel: 'Telegram' }) }}</button>
   </details>
   <details class="notify-group">
     <summary><strong>ntfy（自建 / 官方）</strong> ·
-      <small>{{ user.notify_channels?.ntfy?.configured ? '已配置' : '未配置' }}</small>
+      <small>{{ user.notify_channels?.ntfy?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
-      <input v-model="notifyForm.ntfy.enabled" type="checkbox">启用 ntfy
+      <input v-model="notifyForm.ntfy.enabled" type="checkbox">{{ t('enable_channel', { channel: 'ntfy' }) }}
     </label>
-    <label>服务器地址
+    <label>{{ t('channel_label_2') }}
       <input v-model="notifyForm.ntfy.server_url" placeholder="https://ntfy.sh">
     </label>
-    <label>Topic 主题
+    <label>{{ t('channel_label_3') }}
       <input v-model="notifyForm.ntfy.topic" placeholder="ba8blk-sat">
     </label>
-    <label>Access Token（可选）
+    <label>{{ t('channel_label_4') }}
       <input v-model="notifyForm.ntfy.token" type="password" autocomplete="off">
     </label>
     <label v-if="user.notify_channels?.ntfy?.configured" class="check">
-      <input v-model="notifyForm.ntfy.clear" type="checkbox">保存时清除配置
+      <input v-model="notifyForm.ntfy.clear" type="checkbox">{{ t('clear_cfg') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.ntfy?.configured"
-      @click="testNotifyChannel('ntfy')">测试 ntfy</button>
+      @click="testNotifyChannel('ntfy')">{{ t('test_channel', { channel: 'ntfy' }) }}</button>
   </details>
   <details class="notify-group">
-    <summary><strong>企业微信 / 钉钉 / 飞书机器人</strong> ·
-      <small>{{ user.notify_channels?.bot_webhook?.configured ? '已配置' : '未配置' }}</small>
+    <summary><strong>{{ t('channel_label_10') }}</strong> ·
+      <small>{{ user.notify_channels?.bot_webhook?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
       <input v-model="notifyForm.bot_webhook.enabled" type="checkbox">启用群机器人
@@ -659,37 +683,37 @@ onUnmounted(() => {
         placeholder="https://qyapi.weixin.qq.com/..." autocomplete="off">
     </label>
     <label v-if="user.notify_channels?.bot_webhook?.configured" class="check">
-      <input v-model="notifyForm.bot_webhook.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.bot_webhook.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.bot_webhook?.configured"
       @click="testNotifyChannel('bot_webhook')">测试群机器人</button>
   </details>
   <details class="notify-group">
-    <summary><strong>自定义 Webhook</strong> ·
-      <small>{{ user.notify_channels?.webhook?.configured ? '已配置' : '未配置' }}</small>
+    <summary><strong>{{ t('channel_label_9') }}</strong> ·
+      <small>{{ user.notify_channels?.webhook?.configured ? t('configured') : t('unconfigured') }}</small>
     </summary>
     <label class="check">
       <input v-model="notifyForm.webhook.enabled" type="checkbox">启用自定义 Webhook
     </label>
-    <label>目标 URL
+    <label>{{ t('channel_label_5') }}
       <input v-model="notifyForm.webhook.url" type="password"
         placeholder="https://example.com/hook" autocomplete="off">
     </label>
-    <label>Bearer Token（可选）
+    <label>{{ t('channel_label_6') }}
       <input v-model="notifyForm.webhook.token" type="password" autocomplete="off">
     </label>
     <label v-if="user.notify_channels?.webhook?.configured" class="check">
-      <input v-model="notifyForm.webhook.clear" type="checkbox">保存时清除密钥
+      <input v-model="notifyForm.webhook.clear" type="checkbox">{{ t('clear_secret') }}
     </label>
     <button type="button"
       :disabled="busy || !user.notify_channels?.webhook?.configured"
-      @click="testNotifyChannel('webhook')">测试 Webhook</button>
+      @click="testNotifyChannel('webhook')">{{ t('test_channel', { channel: 'Webhook' }) }}</button>
   </details>
   <div style="margin-top:16px">
-    <button class="primary" :disabled="busy">保存全部推送设置</button>
+    <button class="primary" :disabled="busy">{{ t('save_all_push') }}</button>
     <button type="button" :disabled="busy || !user.bark_configured"
-      @click="testNotifyChannel()">测试所有已启用通道</button>
+      @click="testNotifyChannel()">{{ t('test_all_push') }}</button>
   </div>
 </form>
           </div>
@@ -698,13 +722,13 @@ onUnmounted(() => {
         <!-- 4. 通知记录 -->
         <section v-if="page === 'logs'">
           <div class="eyebrow">DELIVERY HISTORY</div>
-          <h1>通知记录</h1>
-          <p class="muted">保留最近 30 天记录，最多显示 100 条。unknown 表示进程中断后结果不确定，不自动重发。</p>
-          <div class="panel empty" v-if="!logs.length">暂无发送记录。配置 Bark 并启用订阅后，后台会自动安排提醒。</div>
+          <h1>{{ t('nav_logs') }}</h1>
+          <p class="muted">{{ t('logs_desc') }}</p>
+          <div class="panel empty" v-if="!logs.length">{{ t('logs_empty') }}</div>
           <div class="table-wrap" v-else>
             <table>
               <thead>
-                <tr><th>通知</th><th>计划发送</th><th>状态</th><th>尝试次数</th><th>说明</th></tr>
+                <tr><th>{{ t('col_notif') }}</th><th>{{ t('col_due') }}</th><th>{{ t('col_state') }}</th><th>{{ t('col_attempts') }}</th><th>{{ t('col_note') }}</th></tr>
               </thead>
               <tbody>
                 <tr v-for="n in logs" :key="n.id">
@@ -722,62 +746,62 @@ onUnmounted(() => {
         <!-- 5. 系统管理 -->
         <section v-if="page === 'admin' && user.is_admin">
           <div class="eyebrow">SYSTEM CONTROL</div>
-          <h1>系统管理</h1>
-          <p class="muted">后台调度：{{ worker?.worker_enabled ? '已启用' : '已关闭' }} · 最近运行 {{ time(worker?.last_tick_utc) }}</p>
+          <h1>{{ t('nav_admin') }}</h1>
+          <p class="muted">{{ t('worker_status', { state: worker?.worker_enabled ? t('enabled_txt') : t('disabled_txt'), time: time(worker?.last_tick_utc) }) }}</p>
           <div class="columns">
             <div class="panel">
-              <h2>添加 / 刷新卫星</h2>
+              <h2>{{ t('add_refresh_sat') }}</h2>
               <form @submit.prevent="fetchOrbit">
-                <label>星历数据源
+                <label>{{ t('tle_source') }}
                   <select v-model="tleSource">
-                    <option value="auto">自动（优先 AMSAT 星历库 / CelesTrak）</option>
-                    <option value="amsat">AMSAT 官方星历库 (nasabare.txt)</option>
-                    <option value="celestrak">CelesTrak GP 数据库</option>
+                    <option value="auto">{{ t('src_auto') }}</option>
+                    <option value="amsat">{{ t('src_amsat') }}</option>
+                    <option value="celestrak">{{ t('src_celestrak') }}</option>
                   </select>
                 </label>
-                <label>NORAD 编号<input v-model.number="norad" type="number" min="1" required></label>
-                <label>AMSAT 精确名称（可选）<input v-model="amsatName" placeholder="如 ARISS 或 SO-50 (SaudiSat-1C)"></label>
-                <button class="primary" :disabled="busy">获取并更新卫星</button>
-                <button type="button" :disabled="busy" @click="syncDefaultSatellites">同步 11 颗常用卫星</button>
+                <label>{{ t('norad_id') }}<input v-model.number="norad" type="number" min="1" required></label>
+                <label>{{ t('amsat_exact') }}<input v-model="amsatName" placeholder="如 ARISS 或 SO-50 (SaudiSat-1C)"></label>
+                <button class="primary" :disabled="busy">{{ t('fetch_update') }}</button>
+                <button type="button" :disabled="busy" @click="syncDefaultSatellites">{{ t('sync_defaults') }}</button>
               </form>
               <details>
-                <summary>手动导入 TLE / OMM</summary>
+                <summary>{{ t('manual_import') }}</summary>
                 <form @submit.prevent="importOrbit">
-                  <label>格式
+                  <label>{{ t('format') }}
                     <select v-model="orbitFormat">
                       <option value="tle">TLE</option>
                       <option value="omm">OMM JSON（单个对象）</option>
                     </select>
                   </label>
-                  <label>轨道数据<textarea v-model="orbitText" rows="6" required></textarea></label>
-                  <button :disabled="busy">导入轨道</button>
+                  <label>{{ t('orbit_data') }}<textarea v-model="orbitText" rows="6" required></textarea></label>
+                  <button :disabled="busy">{{ t('import_btn') }}</button>
                 </form>
               </details>
             </div>
 
             <div class="panel">
-              <h2>注册管理</h2>
-              <label>注册方式
+              <h2>{{ t('reg_manage') }}</h2>
+              <label>{{ t('reg_mode') }}
                 <select v-model="registerMode">
-                  <option value="closed">关闭注册</option>
-                  <option value="invite">邀请码注册</option>
-                  <option value="approval">管理员审核</option>
+                  <option value="closed">{{ t('mode_closed') }}</option>
+                  <option value="invite">{{ t('mode_invite') }}</option>
+                  <option value="approval">{{ t('mode_approval') }}</option>
                 </select>
               </label>
-              <button :disabled="busy" @click="action(() => api('/admin/registration', 'PUT', { mode: registerMode }), '注册方式已保存')">保存方式</button>
-              <button :disabled="busy" @click="action(async () => { inviteCode = (await api('/admin/invites', 'POST')).invite })">生成邀请码</button>
-              <p v-if="inviteCode" class="code">{{ inviteCode }}<br><small>单次使用，7 天有效</small></p>
-              <h3>用户审核</h3>
+              <button :disabled="busy" @click="action(() => api('/admin/registration', 'PUT', { mode: registerMode }), '注册方式已保存')">{{ t('save_mode') }}</button>
+              <button :disabled="busy" @click="action(async () => { inviteCode = (await api('/admin/invites', 'POST')).invite })">{{ t('gen_invite') }}</button>
+              <p v-if="inviteCode" class="code">{{ inviteCode }}<br><small>{{ t('invite_hint') }}</small></p>
+              <h3>{{ t('user_approval') }}</h3>
               <div v-for="u in users" :key="u.id" class="user-row">
-                <span>{{ u.username }} · {{ u.is_admin ? '管理员' : u.approved ? '已批准' : '待审核 / 停用' }}</span>
-                <button v-if="!u.is_admin" :disabled="busy" @click="action(async () => { await api('/admin/users/' + u.id + '/approval', 'PUT', { approved: !u.approved }); await refresh() })">{{ u.approved ? '停用' : '批准' }}</button>
+                <span>{{ u.username }} · {{ u.is_admin ? t('role_admin') : u.approved ? t('role_approved') : t('role_pending') }}</span>
+                <button v-if="!u.is_admin" :disabled="busy" @click="action(async () => { await api('/admin/users/' + u.id + '/approval', 'PUT', { approved: !u.approved }); await refresh() })">{{ u.approved ? t('btn_disable') : t('btn_approve') }}</button>
               </div>
             </div>
           </div>
         </section>
       </template>
 
-      <footer>SPA · SAT PASS ALERT <span>开源卫星通联助手</span></footer>
+      <footer>SPA · SAT PASS ALERT <span>{{ t('footer_tag') }}</span></footer>
     </main>
   </div>
 </template>

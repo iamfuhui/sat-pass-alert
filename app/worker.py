@@ -1,3 +1,4 @@
+import re
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -10,12 +11,57 @@ from .models import User, Satellite, Subscription, Notification, SystemSetting
 from .orbits import predict
 from .catalog import refresh_one
 from .amsat import refresh_status_async
-from .bark import dispatch_notifications, PushError
+from .bark import dispatch_notifications, has_configured_channel, parse_channels, PushError
 from .security import cipher
 
 log = logging.getLogger(__name__)
 tick_lock = threading.Lock()
 
+
+
+SUPPORTED_LANGS = ('zh-CN', 'en', 'ja')
+
+def get_user_lang(secret_raw, default='zh-CN'):
+    lang = parse_channels(secret_raw).get('_lang')
+    return lang if lang in SUPPORTED_LANGS else default
+
+
+def _localize_amsat(status, lang):
+    if not status or lang == 'zh-CN':
+        return status
+    m_min = re.search(r'\uff08(\d+)\u5206\u949f\u524d\u62a5\u544a\uff09', status)
+    m_hr = re.search(r'\uff08(\d+)\u5c0f\u65f6\u524d\u62a5\u544a\uff09', status)
+    m_day = re.search(r'\uff08(\d+)\u5929\u524d\u62a5\u544a\uff09', status)
+    base = status.split('\uff08')[0]
+    if lang == 'en':
+        if base.startswith('\u672a\u77e5'): return 'Unknown (no recent AMSAT report)'
+        if '刚刚报告' in status: return f'{base} (just reported)'
+        if m_min: return f"{base} ({m_min.group(1)}m ago)"
+        if m_hr: return f"{base} ({m_hr.group(1)}h ago)"
+        if m_day: return f"{base} ({m_day.group(1)}d ago)"
+        return base
+    if lang == 'ja':
+        if base.startswith('\u672a\u77e5'): return '\u4e0d\u660e\uff08\u76f4\u8fd1\u306eAMSAT\u5831\u544a\u306a\u3057\uff09'
+        if '刚刚报告' in status: return f'{base}（報告直後）'
+        if m_min: return f"{base}\uff08{m_min.group(1)}\u5206\u524d\u306b\u5831\u544a\uff09"
+        if m_hr: return f"{base}\uff08{m_hr.group(1)}\u6642\u9593\u524d\u306b\u5831\u544a\uff09"
+        if m_day: return f"{base}\uff08{m_day.group(1)}\u65e5\u524d\u306b\u5831\u544a\uff09"
+        return base
+    return status
+
+def format_pass_message(sat_name, p, tz_name, lang):
+    tz = ZoneInfo(tz_name)
+    la = datetime.fromisoformat(p['aos']).astimezone(tz)
+    ll = datetime.fromisoformat(p['los']).astimezone(tz)
+    am = _localize_amsat(p.get('amsat_status', ''), lang)
+    if lang == 'en':
+        return (f"SPA \u00b7 {sat_name} Upcoming Pass",
+                f"AOS {la:%Y-%m-%d %H:%M:%S %Z} / Az {p['aos_azimuth']}\u00b0\nMax El {p['max_elevation']}\u00b0 / LOS {ll:%H:%M:%S}\nAMSAT: {am} (ref only)")
+    if lang == 'ja':
+        return (f"SPA \u00b7 {sat_name} \u30d1\u30b9\u63a5\u8fd1",
+                f"AOS {la:%Y-%m-%d %H:%M:%S %Z} / \u65b9\u4f4d\u89d2 {p['aos_azimuth']}\u00b0\n\u6700\u5927\u4ef0\u89d2 {p['max_elevation']}\u00b0 / LOS {ll:%H:%M:%S}\nAMSAT: {am}\uff08\u53c2\u8003\u60c5\u5831\uff09")
+    return (f"SPA \u00b7 {sat_name} \u5373\u5c06\u8fc7\u5883",
+            f"AOS {la:%Y-%m-%d %H:%M:%S %Z} / \u65b9\u4f4d {p['aos_azimuth']}\u00b0\n\u6700\u9ad8\u4ef0\u89d2 {p['max_elevation']}\u00b0 / LOS {ll:%H:%M:%S}\nAMSAT: {am}\uff08\u4ec5\u4f9b\u53c2\u8003\uff09")
 
 def plan(db, now):
     rows = db.execute(select(Subscription, User, Satellite)
@@ -25,6 +71,13 @@ def plan(db, now):
     for sub, user, sat in rows:
         if not user.bark_key:
             continue
+        try:
+            secret = cipher().decrypt(user.bark_key.encode()).decode()
+        except InvalidToken:
+            continue
+        if not has_configured_channel(secret):
+            continue
+        lang = get_user_lang(secret)
         try:
             passes = predict(sat, user.latitude, user.longitude, user.altitude_m, now, 24, sub.min_elevation)
         except (ValueError, KeyError):
@@ -37,10 +90,7 @@ def plan(db, now):
         for p in passes:
             aos = datetime.fromisoformat(p['aos']).replace(tzinfo=None, microsecond=0)
             # TLE refresh/numerical search can move AOS; reconcile within the same LEO pass.
-            local = datetime.fromisoformat(p['aos']).astimezone(ZoneInfo(user.timezone))
-            body = (f"AOS {local:%Y-%m-%d %H:%M:%S %Z} / 方位 {p['aos_azimuth']}°\n"
-                    f"最高仰角 {p['max_elevation']}° / LOS {datetime.fromisoformat(p['los']).astimezone(ZoneInfo(user.timezone)):%H:%M:%S}\n"
-                    f"AMSAT: {p['amsat_status']}（仅供参考）")
+            title, body = format_pass_message(sat.name, p, user.timezone, lang)
             existing = db.scalar(select(Notification).where(
                 Notification.user_id == user.id, Notification.norad_id == sat.norad_id,
                 Notification.aos.between(aos - timedelta(minutes=10), aos + timedelta(minutes=10))))
@@ -51,11 +101,12 @@ def plan(db, now):
                 if existing.state == 'pending':
                     if existing.attempts == 0:
                         existing.due_at = aos - timedelta(minutes=sub.lead_minutes)
+                    existing.title = title
                     existing.body = body
                     existing.aos = aos
                 continue
             n = Notification(user_id=user.id, norad_id=sat.norad_id, aos=aos,
-                due_at=aos - timedelta(minutes=sub.lead_minutes), title=f'SPA · {sat.name} 即将过境', body=body)
+                due_at=aos - timedelta(minutes=sub.lead_minutes), title=title, body=body)
             try:
                 with db.begin_nested():
                     db.add(n)
@@ -65,33 +116,42 @@ def plan(db, now):
     db.commit()
 
 
-def deliver(db, now, sender=dispatch_notifications):
+def deliver(db, now, sender=dispatch_notifications, *, clock=utcnow):
     db.execute(update(Notification).where(Notification.state == 'pending', Notification.aos <= now).values(state='expired'))
     db.commit()
     rows = db.scalars(select(Notification).where(Notification.state == 'pending',
         Notification.due_at <= now).order_by(Notification.due_at).limit(100)).all()
     for n in rows:
-        cur_now = utcnow()
         user = db.get(User, n.user_id)
         sub = db.scalar(select(Subscription).where(Subscription.user_id == n.user_id,
             Subscription.norad_id == n.norad_id, Subscription.enabled.is_(True)))
+        cur_now = clock()
         if n.aos <= cur_now or not user or not user.approved or not user.bark_key or not sub:
             n.state = 'expired' if n.aos <= cur_now else 'cancelled'
             db.commit()
             continue
         claimed = db.execute(update(Notification).where(Notification.id == n.id,
-            Notification.state == 'pending').values(state='sending', attempts=Notification.attempts + 1))
+            Notification.state == 'pending', Notification.aos > cur_now, Notification.due_at <= cur_now)
+            .values(state='sending', attempts=Notification.attempts + 1))
         db.commit()
         if not claimed.rowcount:
             continue
         try:
-            sender(cipher().decrypt(user.bark_key.encode()).decode(), n.title, n.body)
-            n.state, n.sent_at, n.last_error = 'sent', utcnow(), None
+            secret = cipher().decrypt(user.bark_key.encode()).decode()
+            if n.aos <= clock():
+                n.state = 'expired'
+                n.attempts -= 1
+            elif not has_configured_channel(secret):
+                n.state = 'cancelled'
+                n.attempts -= 1
+            else:
+                sender(secret, n.title, n.body)
+                n.state, n.sent_at, n.last_error = 'sent', clock(), None
         except (PushError, InvalidToken):
             db.refresh(n)
             n.last_error = '推送失败；检查 Bark 配置或网络'
             n.state = 'failed' if n.attempts >= 3 else 'pending'
-            n.due_at = utcnow() + timedelta(seconds=60 * 2 ** n.attempts)
+            n.due_at = clock() + timedelta(seconds=60 * 2 ** n.attempts)
         db.commit()
 
 
@@ -105,7 +165,7 @@ def run_tick():
             db.execute(update(Notification).where(Notification.state == 'sending')
                 .values(state='unknown', last_error='进程中断，发送结果未知'))
             plan(db, now)
-            deliver(db, now)
+            deliver(db, utcnow())
             db.merge(SystemSetting(key='worker_last_tick', value=now.isoformat()))
             db.execute(delete(Notification).where(Notification.aos < now - timedelta(days=30)))
             db.commit()

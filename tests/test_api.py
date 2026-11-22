@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import select
 from app.db import SessionLocal
 from app.models import User
@@ -46,10 +48,51 @@ def test_profile_validation_and_key_encryption(admin):
     with SessionLocal() as db:
         user=db.scalar(select(User).where(User.username=='admin'))
         assert user.bark_key != 'device_secret'
-        assert cipher().decrypt(user.bark_key.encode()).decode() == 'device_secret'
+        assert json.loads(cipher().decrypt(user.bark_key.encode())) == {
+            'bark': {'enabled': True, 'key': 'device_secret'},
+        }
     assert 'device_secret' not in admin.get('/api/v1/me').text
     assert admin.put('/api/v1/me/bark',json={'key':''}).json() == {'configured':False}
     assert admin.post('/api/v1/me/bark/test').status_code == 400
+
+
+def test_multichannel_updates_preserve_legacy_bark_and_mask_credentials(admin):
+    with SessionLocal.begin() as db:
+        user = db.scalar(select(User).where(User.username == 'admin'))
+        user.bark_key = cipher().encrypt(b'legacy_device_key').decode()
+
+    response = admin.put('/api/v1/me/notify', json={
+        'pushplus': {'enabled': True, 'token': 'private_pushplus_token', 'topic': 'field'},
+    })
+    assert response.status_code == 200
+    channels = response.json()['notify_channels']
+    assert channels['bark'] == {'enabled': True, 'configured': True}
+    assert channels['pushplus'] == {'enabled': True, 'configured': True, 'topic': 'field'}
+
+    response = admin.put('/api/v1/me/notify', json={'pushplus': {'enabled': False, 'topic': 'home'}})
+    assert response.status_code == 200
+    assert response.json()['notify_channels']['pushplus'] == {
+        'enabled': False, 'configured': True, 'topic': 'home',
+    }
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.username == 'admin'))
+        assert json.loads(cipher().decrypt(user.bark_key.encode())) == {
+            'bark': {'enabled': True, 'key': 'legacy_device_key'},
+            'pushplus': {'enabled': False, 'token': 'private_pushplus_token', 'topic': 'home'},
+        }
+    profile = admin.get('/api/v1/me')
+    assert profile.json()['notify_channels'] == response.json()['notify_channels']
+    for secret in ('legacy_device_key', 'private_pushplus_token'):
+        assert secret not in response.text
+        assert secret not in profile.text
+
+    response = admin.put('/api/v1/me/notify', json={'bark': {'clear': True}, 'pushplus': {'enabled': True}})
+    assert response.status_code == 200
+    assert response.json()['notify_channels']['bark'] == {'enabled': False, 'configured': False}
+    assert response.json()['notify_channels']['pushplus'] == {
+        'enabled': True, 'configured': True, 'topic': 'home',
+    }
+    assert admin.get('/api/v1/me').json()['bark_configured'] is True
 
 
 def test_validation_and_auth_rate_limit(client):

@@ -15,17 +15,17 @@ AMSAT_TLE_URLS = (
 )
 
 DEFAULT_SATELLITES = [
-    {'norad_id': 25544, 'name': 'ARISS', 'amsat_name': 'ARISS', 'aliases': ('ISS', 'ZARYA', 'ARISS')},
-    {'norad_id': 27607, 'name': 'SO-50 (SaudiSat-1C)', 'amsat_name': 'SO-50 (SaudiSat-1C)', 'aliases': ('SO-50', 'SAUDISAT 1C', 'SAUDISAT-1C')},
-    {'norad_id': 43678, 'name': 'PO-101 (DIWATA-2)', 'amsat_name': 'PO-101 (DIWATA-2)', 'aliases': ('PO-101', 'DIWATA-2', 'DIWATA 2')},
-    {'norad_id': 61781, 'name': 'AO-123 (ASRTU-1)', 'amsat_name': 'AO-123 (ASRTU-1)', 'aliases': ('AO-123', 'ASRTU-1', 'ASRTU 1')},
-    {'norad_id': 40931, 'name': 'IO-86 (LAPAN-A2)', 'amsat_name': 'IO-86 (LAPAN-A2)', 'aliases': ('IO-86', 'LAPAN-A2', 'LAPAN A2')},
-    {'norad_id': 44909, 'name': 'RS-44 (BREEZE-KM R/B)', 'amsat_name': 'RS-44 (BREEZE-KM R/B)', 'aliases': ('RS-44', 'DOSAAF-85', 'BREEZE-KM')},
-    {'norad_id': 7530, 'name': 'AO-7', 'amsat_name': 'AO-7', 'aliases': ('AO-7', 'AO-07', 'OSCAR 7')},
-    {'norad_id': 39444, 'name': 'AO-73 (FUNCUBE-1)', 'amsat_name': 'AO-73 (FUNCUBE-1)', 'aliases': ('AO-73', 'FUNCUBE-1', 'FUNCUBE 1')},
-    {'norad_id': 43803, 'name': 'JO-97 (JY1SAT)', 'amsat_name': 'JO-97 (JY1SAT)', 'aliases': ('JO-97', 'JY1SAT')},
-    {'norad_id': 24278, 'name': 'FO-29 (JAS-2)', 'amsat_name': 'FO-29 (JAS-2)', 'aliases': ('FO-29', 'JAS-2', 'JAS 2')},
-    {'norad_id': None, 'name': 'SO-131', 'amsat_name': 'SO-131', 'aliases': ('SO-131', 'SO131')},
+    {'norad_id': 25544, 'name': 'ARISS', 'amsat_name': 'ISS_[FM]', 'aliases': ('ISS', 'ZARYA', 'ARISS')},
+    {'norad_id': 27607, 'name': 'SO-50 (SaudiSat-1C)', 'amsat_name': 'SO-50_[FM]', 'aliases': ('SO-50', 'SAUDISAT 1C', 'SAUDISAT-1C')},
+    {'norad_id': 43678, 'name': 'PO-101 (DIWATA-2)', 'amsat_name': 'PO-101_[FM]', 'aliases': ('PO-101', 'DIWATA-2', 'DIWATA 2')},
+    {'norad_id': 61781, 'name': 'AO-123 (ASRTU-1)', 'amsat_name': 'AO-123_[FM]', 'aliases': ('AO-123', 'ASRTU-1', 'ASRTU 1')},
+    {'norad_id': 40931, 'name': 'IO-86 (LAPAN-A2)', 'amsat_name': 'IO-86_[FM]', 'aliases': ('IO-86', 'LAPAN-A2', 'LAPAN A2')},
+    {'norad_id': 44909, 'name': 'RS-44 (BREEZE-KM R/B)', 'amsat_name': 'RS-44_[V/u]', 'aliases': ('RS-44', 'DOSAAF-85', 'BREEZE-KM')},
+    {'norad_id': 7530, 'name': 'AO-7', 'amsat_name': 'AO-7_[U/v]', 'aliases': ('AO-7', 'AO-07', 'OSCAR 7')},
+    {'norad_id': 39444, 'name': 'AO-73 (FUNCUBE-1)', 'amsat_name': 'AO-73_[U/v]', 'aliases': ('AO-73', 'FUNCUBE-1', 'FUNCUBE 1')},
+    {'norad_id': 43803, 'name': 'JO-97 (JY1SAT)', 'amsat_name': 'JO-97_[U/v]', 'aliases': ('JO-97', 'JY1SAT')},
+    {'norad_id': 24278, 'name': 'FO-29 (JAS-2)', 'amsat_name': 'FO-29_[V/u]', 'aliases': ('FO-29', 'JAS-2', 'JAS 2')},
+    {'norad_id': None, 'name': 'SO-131', 'amsat_name': 'SO-131_[V/u_FM]', 'aliases': ('SO-131', 'SO131')},
 ]
 
 _amsat_cache = {'fetched_at': 0.0, 'entries': []}

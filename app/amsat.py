@@ -30,7 +30,12 @@ def _format_report_age(delta: timedelta) -> str:
 
 def parse_status(html, name, now):
     soup = BeautifulSoup(html, 'html.parser')
-    link = next((a for a in soup.find_all('a') if a.get_text(strip=True) == name), None)
+    target = (name or '').strip()
+    links = [a for a in soup.find_all('a') if a.find_parent('tr') and len(a.find_parent('tr').find_all('td')) > 1]
+    link = next((a for a in links if a.get_text(strip=True) == target), None)
+    if not link and target and '_[' not in target:
+        prefix = target + '_['
+        link = next((a for a in links if a.get_text(strip=True).startswith(prefix)), None)
     if not link:
         return '未知（未匹配 AMSAT 名称）'
     row = link.find_parent('tr')

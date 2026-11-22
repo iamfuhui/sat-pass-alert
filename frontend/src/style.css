@@ -141,3 +141,4 @@
     grid-column: 1 / -1;
   }
 }
+.sat-actions{display:flex;gap:8px;align-items:center}.danger{background:#fff1f2;color:#be123c;border-color:#fecdd3}.danger:hover{background:#ffe4e6;border-color:#fda4af}

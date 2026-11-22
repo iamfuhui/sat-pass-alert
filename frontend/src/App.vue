@@ -218,7 +218,7 @@ async function saveStation() {
   await action(async () => {
     setUser(await api('/me', 'PUT', station))
     await refresh()
-  }, '观测站已保存')
+  }, '电台站设置已保存')
 }
 
 async function saveRule(s) {
@@ -226,6 +226,14 @@ async function saveRule(s) {
     await api('/subscriptions/' + s.norad_id, 'PUT', s.rule)
     await refresh()
   }, '订阅规则已保存')
+}
+
+async function deleteSatellite(s) {
+  if (!window.confirm(`确定要从目录中删除「${s.name}」(NORAD ${s.norad_id}) 吗？\n删除后将同时清除所有用户的该卫星订阅及待发送提醒。`)) return
+  await action(async () => {
+    await api('/admin/satellites/' + s.norad_id, 'DELETE')
+    await refresh()
+  }, `已删除卫星 ${s.name}`)
 }
 
 const tleSource = ref('auto')
@@ -284,7 +292,7 @@ onUnmounted(() => {
       <div class="sidebar-caption">AMATEUR RADIO · ORBIT WATCH</div>
       <nav v-if="user" aria-label="主导航">
         <button
-          v-for="item in [{id:'passes',name:'过境预报'},{id:'satellites',name:'卫星订阅'},{id:'station',name:'观测站与推送'},{id:'logs',name:'通知记录'},...(user.is_admin?[{id:'admin',name:'系统管理'}]:[])]"
+          v-for="item in [{id:'passes',name:'过境预报'},{id:'satellites',name:'卫星订阅'},{id:'station',name:'电台站设置'},{id:'logs',name:'通知记录'},...(user.is_admin?[{id:'admin',name:'系统管理'}]:[])]"
           :key="item.id"
           :class="{ active: page === item.id }"
           @click="page = item.id"
@@ -452,14 +460,17 @@ onUnmounted(() => {
             <label>最低最高仰角（°）<input v-model.number="s.rule.min_elevation" type="number" min="0" max="90" step="1" required></label>
             <label>提前提醒（分钟）<input v-model.number="s.rule.lead_minutes" type="number" min="1" max="120" required></label>
             <label class="check"><input v-model="s.rule.enabled" type="checkbox">启用订阅</label>
-            <button :disabled="busy">保存</button>
+            <div class="sat-actions">
+              <button class="primary" :disabled="busy">保存</button>
+              <button v-if="user.is_admin" type="button" class="danger" :disabled="busy" @click="deleteSatellite(s)">删除</button>
+            </div>
           </form>
         </section>
 
         <!-- 3. 观测站与推送 -->
         <section v-if="page === 'station'">
           <div class="eyebrow">STATION SETTINGS</div>
-          <h1>观测站与推送</h1>
+          <h1>电台站设置</h1>
           <div class="columns">
             <form class="panel" @submit.prevent="saveStation">
               <h2>观测位置</h2>
@@ -473,7 +484,7 @@ onUnmounted(() => {
               <label>经度<input @input="manualCoordinates" v-model.number="station.longitude" type="number" min="-180" max="180" step="any" required></label>
               <label>海拔（米）<input v-model.number="station.altitude_m" type="number" min="-500" max="10000" step="any" required></label>
               <label>显示时区<input v-model="station.timezone" placeholder="Asia/Shanghai" required></label>
-              <button class="primary" :disabled="busy || !!gridError">保存观测站</button>
+              <button class="primary" :disabled="busy || !!gridError">保存电台站设置</button>
             </form>
 
             <form class="panel" @submit.prevent="action(async () => { await api('/me/bark', 'PUT', { key: barkKey }); setUser(await api('/me')); barkKey = '' }, 'Bark 设置已保存')">

@@ -11,7 +11,7 @@ import httpx
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from .config import settings
@@ -239,6 +239,22 @@ def sync_defaults_route(data: SyncDefaultsInput, request: Request, user: User = 
     db.commit()
     refresh_status_async()
     return {'synced': count}
+
+
+@app.delete('/api/v1/admin/satellites/{norad_id}')
+def delete_satellite(norad_id: int, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    sat = db.get(Satellite, norad_id)
+    if sat is None:
+        raise HTTPException(404, '未找到该卫星')
+    db.execute(delete(Subscription).where(Subscription.norad_id == norad_id))
+    db.execute(
+        update(Notification)
+        .where(Notification.norad_id == norad_id, Notification.state.in_(['pending', 'sending']))
+        .values(state='cancelled', last_error='卫星已从目录删除')
+    )
+    db.delete(sat)
+    db.commit()
+    return {'ok': True, 'norad_id': norad_id}
 
 
 @app.get('/api/v1/subscriptions')

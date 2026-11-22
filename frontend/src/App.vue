@@ -6,6 +6,61 @@ import { gridCenter } from './locator.js'
 const user = ref(null), page = ref('passes'), error = ref(''), notice = ref(''), busy = ref(false)
 const auth = reactive({ username: '', password: '', invite: '' }), registerMode = ref('closed'), signingUp = ref(false)
 const station = reactive({ latitude: 0, longitude: 0, altitude_m: 0, timezone: 'Asia/Shanghai', locator: '' }), barkKey = ref('')
+const notifyForm = reactive({
+  bark: { enabled: true, key: '', clear: false },
+  serverchan: { enabled: false, sendkey: '', clear: false },
+  pushplus: { enabled: false, token: '', topic: '', clear: false },
+  telegram: { enabled: false, bot_token: '', chat_id: '', clear: false },
+  ntfy: { enabled: false, server_url: 'https://ntfy.sh', topic: '', token: '', clear: false },
+  bot_webhook: { enabled: false, url: '', clear: false },
+  webhook: { enabled: false, url: '', token: '', clear: false }
+})
+
+function syncNotifyForm(u) {
+  const ch = u?.notify_channels || {}
+  if (ch.bark) notifyForm.bark.enabled = !!ch.bark.enabled
+  if (ch.serverchan) notifyForm.serverchan.enabled = !!ch.serverchan.enabled
+  if (ch.pushplus) {
+    notifyForm.pushplus.enabled = !!ch.pushplus.enabled
+    notifyForm.pushplus.topic = ch.pushplus.topic || ''
+  }
+  if (ch.telegram) {
+    notifyForm.telegram.enabled = !!ch.telegram.enabled
+    notifyForm.telegram.chat_id = ch.telegram.chat_id || ''
+  }
+  if (ch.ntfy) {
+    notifyForm.ntfy.enabled = !!ch.ntfy.enabled
+    notifyForm.ntfy.server_url = ch.ntfy.server_url || 'https://ntfy.sh'
+    notifyForm.ntfy.topic = ch.ntfy.topic || ''
+  }
+  if (ch.bot_webhook) notifyForm.bot_webhook.enabled = !!ch.bot_webhook.enabled
+  if (ch.webhook) notifyForm.webhook.enabled = !!ch.webhook.enabled
+}
+
+async function saveNotifyChannels() {
+  await action(async () => {
+    await api('/me/notify', 'PUT', notifyForm)
+    const u = await api('/me')
+    setUser(u)
+    syncNotifyForm(u)
+    notifyForm.bark.key = ''
+    notifyForm.serverchan.sendkey = ''
+    notifyForm.pushplus.token = ''
+    notifyForm.telegram.bot_token = ''
+    notifyForm.ntfy.token = ''
+    notifyForm.bot_webhook.url = ''
+    notifyForm.webhook.url = ''
+    notifyForm.webhook.token = ''
+    for (const k of Object.keys(notifyForm)) notifyForm[k].clear = false
+  }, '推送通道设置已保存')
+}
+
+async function testNotifyChannel(channel = null) {
+  await action(async () => {
+    const res = await api('/me/notify/test', 'POST', channel ? { channel } : {})
+    notice.value = res.errors?.length ? `部分成功（${res.errors.join('；')}）` : '测试通知已发送，请检查接收端'
+  })
+}
 const satellites = ref([]), subscriptions = ref([]), passes = ref([]), warnings = ref([]), logs = ref([]), users = ref([])
 const hours = ref(24), norad = ref(25544), amsatName = ref('ISS_[FM]'), orbitText = ref(''), orbitFormat = ref('tle'), inviteCode = ref(''), worker = ref(null)
 const gridError = ref('')
@@ -171,6 +226,7 @@ async function action(fn, message = '') {
 
 function setUser(value) {
   user.value = value
+  syncNotifyForm(value)
   for (const key in station) {
     station[key] = value[key] ?? (key === 'locator' ? '' : station[key])
   }

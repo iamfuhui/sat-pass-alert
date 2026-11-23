@@ -23,7 +23,7 @@ from .schemas import Credentials, Registration, Profile, BarkConfig, Subscriptio
 from .orbits import predict
 from .catalog import save_satellite, refresh_one, sync_default_satellites
 from .amsat import refresh_status_async
-from .bark import dispatch_notifications, has_configured_channel, mask_channels_summary, normalize_bark_key, parse_channels, PushError
+from .bark import dispatch_notifications, has_configured_channel, mask_channels_summary, normalize_bark_key, parse_channels, normalize_serverchan_key, validate_bark_origin, PushError
 from .worker import get_user_lang, SUPPORTED_LANGS
 from .worker import loop
 
@@ -32,9 +32,10 @@ from .worker import loop
 async def lifespan(app):
     if len(settings.secret) < 32:
         raise RuntimeError('APP_SECRET_KEY must contain at least 32 characters')
-    origin = urlsplit(settings.bark_origin)
-    if origin.scheme not in ('https', 'http') or not origin.hostname or origin.username or origin.query or origin.fragment:
-        raise RuntimeError('Invalid BARK_SERVER_URL')
+    try:
+        validate_bark_origin(settings.bark_origin)
+    except PushError as exc:
+        raise RuntimeError(str(exc)) from None
     with SessionLocal() as db:
         if db.scalar(select(User).where(User.is_admin.is_(True))) is None:
             if len(settings.admin_password) < 12:
@@ -207,8 +208,12 @@ def update_me(data: Profile, user: User = Depends(current_user), db: Session = D
 @app.put('/api/v1/me/bark')
 def bark_config(data: BarkConfig, user: User = Depends(current_user), db: Session = Depends(get_db)):
     existing = parse_channels(_decrypt_notify(user))
+    try:
+        key = normalize_bark_key(data.key)
+    except PushError as exc:
+        raise HTTPException(422, str(exc))
     if data.key:
-        existing['bark'] = {'enabled': True, 'key': normalize_bark_key(data.key)}
+        existing['bark'] = {'enabled': True, 'key': key}
     else:
         existing.pop('bark', None)
     user.bark_key = cipher().encrypt(json.dumps(existing).encode()).decode() if existing else None
@@ -222,6 +227,21 @@ async def notify_save(request: Request, user: User = Depends(current_user), db: 
     if not isinstance(body, dict):
         raise HTTPException(422, '无效的配置格式')
     existing = parse_channels(_decrypt_notify(user))
+    # Validate before mutating or encrypting any provider configuration.
+    try:
+        for channel, field, normalizer in (
+            ('bark', 'key', normalize_bark_key),
+            ('serverchan', 'sendkey', normalize_serverchan_key),
+        ):
+            if channel not in body:
+                continue
+            cfg = body[channel]
+            if not isinstance(cfg, dict):
+                raise PushError('推送通道配置必须为对象')
+            if not cfg.get('clear') and cfg.get(field) is not None and cfg.get(field) != '':
+                cfg[field] = normalizer(cfg[field])
+    except PushError as exc:
+        raise HTTPException(422, str(exc))
 
     if 'bark' in body and isinstance(body['bark'], dict):
         b = body['bark']

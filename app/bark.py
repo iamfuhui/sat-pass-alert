@@ -12,12 +12,65 @@ class PushError(Exception):
     pass
 
 
-def normalize_bark_key(raw: str) -> str:
-    val = (raw or '').strip()
+def validate_bark_origin(raw):
+    message = 'BARK_SERVER_URL 仅用于 Bark 服务地址；Server酱请在网页对应通道配置 SendKey'
+    try:
+        p = urlsplit(raw)
+        if (p.scheme not in ('https', 'http') or not p.hostname or p.username
+                or p.password or p.query or p.fragment or p.hostname.lower() == 'sctapi.ftqq.com'):
+            raise ValueError()
+        _ = p.port
+    except (ValueError, TypeError):
+        raise PushError(message) from None
+    return raw.rstrip('/')
+
+
+def normalize_serverchan_key(raw):
+    if not isinstance(raw, str):
+        raise PushError('Server酱 SendKey 必须为文本')
+    val = raw.strip()
     if val.startswith(('http://', 'https://')):
-        parts = [p for p in urlsplit(val).path.split('/') if p]
-        if parts:
-            val = parts[0]
+        try:
+            p = urlsplit(val)
+            if (p.scheme != 'https' or p.hostname != 'sctapi.ftqq.com' or p.username
+                    or p.password or p.port not in (None, 443) or p.fragment):
+                raise ValueError()
+            val = p.path.removeprefix('/')
+            if '/' in val:
+                raise ValueError()
+            val = val.removesuffix('.send')
+        except ValueError:
+            raise PushError('Server酱链接必须来自 https://sctapi.ftqq.com；也可填写纯 SendKey') from None
+    if not re.fullmatch(r'SCT[A-Za-z0-9_-]{5,125}', val):
+        raise PushError('Server酱 SendKey 格式无效，请填写 SCT 开头的 Key 或官方发送链接')
+    return val
+
+
+def normalize_bark_key(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise PushError('Bark 设备 Key 必须为文本')
+    val = raw.strip()
+    if not val:
+        return ''
+    if val.startswith(('http://', 'https://')):
+        try:
+            p = urlsplit(val)
+            if p.hostname == 'sctapi.ftqq.com':
+                raise PushError('这是 Server酱链接，请使用 Server酱通道')
+            base = urlsplit(validate_bark_origin(settings.bark_origin))
+            if (p.scheme != base.scheme or p.hostname != base.hostname or p.port != base.port
+                    or p.username or p.password or p.query or p.fragment):
+                raise ValueError()
+            prefix = base.path.rstrip('/') + '/'
+            if not p.path.startswith(prefix):
+                raise ValueError()
+            val = p.path[len(prefix):].rstrip('/')
+        except ValueError:
+            raise PushError('Bark 链接须匹配已配置的 Bark 服务，且仅包含设备 Key；不接受查询参数') from None
+    if val.startswith('SCT'):
+        raise PushError('这是 Server酱 SendKey，请使用 Server酱通道')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', val):
+        raise PushError('Bark 设备 Key 格式无效')
     return val
 
 
@@ -53,7 +106,7 @@ def parse_channels(decrypted_secret: str | None) -> dict:
                 return data
         except ValueError:
             pass
-    return {'bark': {'enabled': True, 'key': normalize_bark_key(s)}}
+    return {'bark': {'enabled': True, 'key': s}}
 
 
 def has_configured_channel(decrypted_secret: str | None) -> bool:
@@ -129,9 +182,7 @@ def send_bark(key, title, body, transport=None):
 
 
 def _send_serverchan(cfg: dict, title: str, body: str, transport=None):
-    sendkey = (cfg.get('sendkey') or '').strip()
-    if not re.match(r'^[A-Za-z0-9_-]{8,128}$', sendkey):
-        raise PushError('Server酱 SendKey 格式无效')
+    sendkey = normalize_serverchan_key(cfg.get('sendkey') or '')
     url = f'https://sctapi.ftqq.com/{sendkey}.send'
     try:
         with httpx.Client(timeout=15, follow_redirects=False, transport=transport) as client:
